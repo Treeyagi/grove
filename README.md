@@ -1,3 +1,5 @@
+<p align="center"><img src="grove.svg" width="140" alt="Grove: the wizard tree"></p>
+
 # Grove
 
 A small GTK4 / libadwaita app for Linux that pulls in your GitHub repos, sorts them into a tree of

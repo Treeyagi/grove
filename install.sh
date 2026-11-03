@@ -7,9 +7,11 @@ set -e
 BASE="${GROVE_BASE:-https://raw.githubusercontent.com/Treeyagi/grove/main}"
 DEST="$HOME/.local/share/grove"
 APPS="$HOME/.local/share/applications"
+ICONS="$HOME/.local/share/icons/hicolor/scalable/apps"
+ICON_NAME="io.github.grove.Launcher"
 
 if [ "$1" = "--uninstall" ]; then
-  rm -rf "$DEST" "$APPS/grove.desktop"
+  rm -rf "$DEST" "$APPS/grove.desktop" "$ICONS/$ICON_NAME.svg"
   echo "Grove removed. Your projects list (~/.config/grove) was left alone."
   exit 0
 fi
@@ -23,14 +25,17 @@ if ! python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version(
   exit 1
 fi
 
-mkdir -p "$DEST" "$APPS"
+mkdir -p "$DEST" "$APPS" "$ICONS"
 here=$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)
 if [ -n "$here" ] && [ -f "$here/grove.py" ]; then
   cp "$here/grove.py" "$DEST/grove.py"
+  cp "$here/grove.svg" "$ICONS/$ICON_NAME.svg" 2>/dev/null || true
 else
   command -v curl >/dev/null || { echo "curl is required." >&2; exit 1; }
   curl -fsSL "$BASE/grove.py" -o "$DEST/grove.py.tmp" && mv "$DEST/grove.py.tmp" "$DEST/grove.py"
+  curl -fsSL "$BASE/grove.svg" -o "$ICONS/$ICON_NAME.svg" 2>/dev/null || true
 fi
+command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 chmod +x "$DEST/grove.py"
 
 cat > "$APPS/grove.desktop" <<DESK
@@ -39,7 +44,7 @@ Type=Application
 Name=Grove
 Comment=GitHub project tree launcher
 Exec=python3 $DEST/grove.py
-Icon=folder-symbolic
+Icon=$ICON_NAME
 Categories=Development;
 Terminal=false
 DESK

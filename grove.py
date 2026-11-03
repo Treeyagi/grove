@@ -18,6 +18,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, GObject, Gtk  # noqa: E402
 
 APP_ID = "io.github.grove.Launcher"
+ICON_NAME = "io.github.grove.Launcher"  # the wizard-tree icon installed by install.sh
 CONFIG = os.path.join(GLib.get_user_config_dir(), "grove", "config.json")
 CACHE_DIR = os.path.join(GLib.get_user_cache_dir(), "grove", "readmes")
 INBOX = "Unsorted"
@@ -396,6 +397,18 @@ class Grove(Adw.ApplicationWindow):
             self.get_display(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         Grove._css_loaded = True
 
+    def logo(self, size):
+        """The wizard-tree logo: from the installed icon, or grove.svg next to this script."""
+        if Gtk.IconTheme.get_for_display(self.get_display()).has_icon(ICON_NAME):
+            return Gtk.Image(icon_name=ICON_NAME, pixel_size=size)
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "grove.svg")
+        if os.path.exists(path):
+            pic = Gtk.Picture.new_for_filename(path)
+            pic.set_size_request(size, size)
+            pic.set_can_shrink(False)
+            return pic
+        return None
+
     def T(self, text):
         return text.upper() if self.settings["hackers"] else text
 
@@ -557,12 +570,16 @@ class Grove(Adw.ApplicationWindow):
             if hack:
                 page.set_paintable(None)
                 box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, halign=Gtk.Align.CENTER)
+                logo = self.logo(112)
+                if logo:
+                    box.append(logo)
                 box.append(Gtk.Label(label=BANNER, css_classes=["banner"], selectable=False))
                 box.append(Gtk.Label(label="H A C K   T H E   P L A N E T", css_classes=["tagline"]))
                 page.set_child(box)
                 parent = box
             else:
-                page.set_icon_name("folder-symbolic")
+                page.set_icon_name(ICON_NAME if Gtk.IconTheme.get_for_display(self.get_display()).has_icon(ICON_NAME)
+                                   else "folder-symbolic")
                 parent = Gtk.Box(halign=Gtk.Align.CENTER)
                 page.set_child(parent)
             btn = Gtk.Button(label=self.T("Sync from GitHub"), halign=Gtk.Align.CENTER,
@@ -1254,6 +1271,7 @@ class App(Adw.Application):
         super().__init__(application_id=APP_ID)
 
     def do_activate(self):
+        Gtk.Window.set_default_icon_name(ICON_NAME)
         (self.props.active_window or Grove(self)).present()
 
 
