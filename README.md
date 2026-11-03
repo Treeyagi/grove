@@ -26,6 +26,8 @@ Options go after `sh -s --`, for example `... | sh -s -- --no-launch` or `... | 
 ## Using it
 
 - Press the refresh button to sync your repos into an "Unsorted" group, then move them into your own groups.
+- Every project shows a plain-language summary taken from its README (with a button to read the whole thing),
+  and the tree shows a one-line blurb under each name. Use the search box to find a repo by what it does.
 - Each project has **Editor, Terminal, Install, Run, Files** and **GitHub** buttons. Install and Run
   commands are detected from the repo (npm, cargo, go, Python, make, `install.sh`) and can be edited.
 - Install clones the repo first if it is not on disk yet.

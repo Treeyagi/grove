@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Grove: organise your GitHub projects in a custom tree and launch them."""
+import base64
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -16,6 +18,7 @@ from gi.repository import Adw, Gio, GLib, GObject, Gtk  # noqa: E402
 
 APP_ID = "io.github.grove.Launcher"
 CONFIG = os.path.join(GLib.get_user_config_dir(), "grove", "config.json")
+CACHE_DIR = os.path.join(GLib.get_user_cache_dir(), "grove", "readmes")
 INBOX = "Unsorted"
 
 # argv inserted between the terminal executable and the command to run
@@ -83,6 +86,13 @@ window.hackers row { background: transparent; }
 window.hackers row.entry:focus-within { box-shadow: inset 0 0 0 1px #ff2bd6; }
 window.hackers entry, window.hackers text { color: #00ff9c; caret-color: #ff2bd6; background: transparent; }
 window.hackers preferencesgroup > box > box > label.heading { color: #ff2bd6; letter-spacing: 2px; }
+window.hackers .card { background: rgba(0,255,156,0.05); border: 1px solid rgba(0,255,156,0.4);
+  border-radius: 0; box-shadow: none; }
+window.hackers .title-2 { color: #ff2bd6; text-shadow: 0 0 8px rgba(255,43,214,0.6); }
+window.hackers textview, window.hackers textview text { background: transparent; color: #00ff9c; }
+window.hackers searchentry { border: 1px solid rgba(0,229,255,0.5); border-radius: 0; }
+window.hackers row.expander { background: transparent; }
+window.hackers .readme { background-color: #05060a; }
 window.hackers toast { background: #080a12; color: #00ff9c; border: 1px solid #00ff9c; border-radius: 0; }
 window.hackers scrollbar slider { background: #00e5ff; border-radius: 0; }
 """
@@ -171,20 +181,114 @@ def spawn(argv, cwd=None):
     return None
 
 
+def repo_slug(url):
+    m = re.match(r"https?://github\.com/([^/]+/[^/#?]+?)(?:\.git)?/?$", url or "")
+    return m.group(1) if m else None
+
+
+def clean_inline(t):
+    t = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", t)
+    t = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", t)
+    t = re.sub(r"<[^>]+>", "", t)
+    t = re.sub(r"(\*\*|__)(.+?)\1", r"\2", t)
+    t = re.sub(r"`([^`]*)`", r"\1", t)
+    return t.strip()
+
+
+def summarize(md):
+    """Pull a plain-language blurb and a few highlight bullets out of a README."""
+    md = re.sub(r"<!--.*?-->", "", md, flags=re.S)
+    summary, bullets, para, in_code, closed, wanted = "", [], [], False, False, False
+    feature_heading = re.compile(r"feature|what (it|you|this)|highlight|overview|about|can do", re.I)
+    skip = re.compile(r"(#|\||>|[-*+]\s|\d+[.)]\s|<|!\[|\[!\[|-{3}|={3})")
+    for raw in md.splitlines() + [""]:
+        line = raw.strip()
+        if line.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            continue
+        if line and not skip.match(line):
+            para.append(clean_inline(line))
+            continue
+        text = " ".join(p for p in para if p)
+        para = []
+        if len(text) >= 40 and not summary:
+            summary = text
+            wanted = wanted or text.endswith(":")  # "It has:" introduces the list that follows
+        if line.startswith("#"):
+            wanted = bool(feature_heading.search(line))
+            closed = closed or bool(bullets)
+        m = re.match(r"[-*+]\s+(.*)", line)
+        if m and summary and wanted and not closed and len(bullets) < 6:
+            item = clean_inline(m.group(1))
+            if 8 <= len(item) <= 110:
+                bullets.append(item)
+    if len(summary) > 320:
+        cut = summary[:320]
+        summary = (cut[:cut.rfind(". ") + 1] if ". " in cut[120:] else cut.rstrip() + "…")
+    return summary, bullets
+
+
+def render_markdown(buf, md):
+    """Very small markdown-to-TextBuffer renderer: headings, code, lists, plain links."""
+    buf.create_tag("h1", scale=1.6, weight=700)
+    buf.create_tag("h2", scale=1.3, weight=700)
+    buf.create_tag("h3", scale=1.1, weight=700)
+    buf.create_tag("code", family="monospace", scale=0.95)
+    md = re.sub(r"<!--.*?-->", "", md, flags=re.S)
+    in_code, pending = False, ""
+
+    def flush():
+        nonlocal pending
+        if pending:
+            buf.insert(buf.get_end_iter(), pending + "\n")
+            pending = ""
+
+    for raw in md.splitlines():
+        if raw.strip().startswith("```"):
+            flush()
+            in_code = not in_code
+            continue
+        if in_code or raw.lstrip().startswith("|"):
+            flush()
+            buf.insert_with_tags_by_name(buf.get_end_iter(), raw + "\n", "code")
+            continue
+        m = re.match(r"(#{1,6})\s+(.*)", raw.strip())
+        if m:
+            flush()
+            tag = f"h{min(len(m.group(1)), 3)}"
+            buf.insert_with_tags_by_name(buf.get_end_iter(), clean_inline(m.group(2)) + "\n", tag)
+        elif re.match(r"\s*[-*+]\s", raw):
+            flush()
+            pending = re.match(r"\s*", raw).group(0) + "• " + clean_inline(re.sub(r"^\s*[-*+]\s+", "", raw))
+        elif raw.strip():
+            # soft-wrapped line: join it onto the paragraph or list item above
+            pending = (pending + " " if pending else "") + clean_inline(raw)
+        else:
+            flush()
+            buf.insert(buf.get_end_iter(), "\n")
+    flush()
+
+
 class Node(GObject.Object):
     title = GObject.Property(type=str, default="")
+    subtitle = GObject.Property(type=str, default="")
 
-    def __init__(self, data, kids=None):
-        super().__init__(title=data["name"])
+    def __init__(self, data, kids=None, subtitle=""):
+        super().__init__(title=data["name"], subtitle=subtitle)
         self.data = data
         self.kids = kids
         self.is_group = data["type"] == "group"
 
 
-def build_store(items):
+def build_store(items, blurb=lambda d: ""):
     store = Gio.ListStore(item_type=Node)
     for d in sorted(items, key=lambda d: (d["type"] != "group", d["name"].lower())):
-        store.append(Node(d, build_store(d["children"]) if d["type"] == "group" else None))
+        if d["type"] == "group":
+            store.append(Node(d, build_store(d["children"], blurb)))
+        else:
+            store.append(Node(d, None, blurb(d)))
     return store
 
 
@@ -194,6 +298,9 @@ class Grove(Adw.ApplicationWindow):
         self.load()
         self.sel = None
         self.expanded = set(self.data.get("expanded", []))
+        self.query = ""
+        self.readmes = {}        # project id -> README text ("" = repo has none)
+        self.fetching = set()    # project ids with a README download in flight
 
         self.toasts = Adw.ToastOverlay()
         self.set_content(self.toasts)
@@ -212,12 +319,16 @@ class Grove(Adw.ApplicationWindow):
         header.pack_start(add_proj)
         header.pack_start(add_grp)
         menu = Gio.Menu()
+        menu.append("Re-read all READMEs", "win.readmes")
         menu.append("Hackers theme", "win.hackers")
         menu.append("Settings", "win.settings")
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu))
         act = Gio.SimpleAction.new("settings", None)
         act.connect("activate", lambda *_: self.show_settings())
         self.add_action(act)
+        reread = Gio.SimpleAction.new("readmes", None)
+        reread.connect("activate", lambda *_: self.prefetch_readmes(force=True))
+        self.add_action(reread)
         theme = Gio.SimpleAction.new_stateful(
             "hackers", None, GLib.Variant.new_boolean(self.settings["hackers"]))
         theme.connect("change-state", self._toggle_hackers)
@@ -231,6 +342,10 @@ class Grove(Adw.ApplicationWindow):
         self.view.connect("activate", self._row_activated)
         side = Adw.ToolbarView(content=Gtk.ScrolledWindow(child=self.view))
         side.add_top_bar(header)
+        self.search = Gtk.SearchEntry(placeholder_text="Search projects…", margin_start=8,
+                                      margin_end=8, margin_bottom=8)
+        self.search.connect("search-changed", self._on_search)
+        side.add_top_bar(self.search)
         self.side_page = Adw.NavigationPage(title="Projects", child=side)
         split.set_sidebar(self.side_page)
 
@@ -244,6 +359,11 @@ class Grove(Adw.ApplicationWindow):
         self.connect("close-request", self._on_close)
         self.load_css()
         self.apply_theme()
+        self.rebuild()
+        GLib.idle_add(self.prefetch_readmes)
+
+    def _on_search(self, entry):
+        self.query = entry.get_text().strip().lower()
         self.rebuild()
 
     # ---- theme -------------------------------------------------------
@@ -343,7 +463,8 @@ class Grove(Adw.ApplicationWindow):
             self.expanded.add(parent["id"])
             _, _, parent = self.find(parent["id"])
 
-        model = Gtk.TreeListModel.new(build_store(self.tree), False, False, lambda n: n.kids)
+        root = self.search_store() if self.query else build_store(self.tree, self.blurb)
+        model = Gtk.TreeListModel.new(root, False, False, lambda n: n.kids)
         i = 0
         while i < model.get_n_items():
             row = model.get_item(i)
@@ -362,11 +483,15 @@ class Grove(Adw.ApplicationWindow):
     def _row_setup(self, _f, item):
         box = Gtk.Box(spacing=8)
         box.icon = Gtk.Image()
-        box.label = Gtk.Label(xalign=0, hexpand=True, ellipsize=3)
+        box.label = Gtk.Label(xalign=0, ellipsize=3)
+        box.sub = Gtk.Label(xalign=0, ellipsize=3, css_classes=["dim-label", "caption"])
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER)
+        text.append(box.label)
+        text.append(box.sub)
         box.lock = Gtk.Image(icon_name="changes-prevent-symbolic", css_classes=["dim-label"],
                              tooltip_text="Private repository")
         box.badge = Gtk.Label(css_classes=["dim-label", "caption"])
-        for w in (box.icon, box.label, box.lock, box.badge):
+        for w in (box.icon, text, box.lock, box.badge):
             box.append(w)
         item.set_child(Gtk.TreeExpander(child=box))
 
@@ -384,12 +509,15 @@ class Grove(Adw.ApplicationWindow):
             box.badge.set_label("●" if cloned else "")
             box.badge.set_tooltip_text("Cloned locally" if cloned else None)
         box.binding = node.bind_property("title", box.label, "label", GObject.BindingFlags.SYNC_CREATE)
+        box.sub_binding = node.bind_property("subtitle", box.sub, "label", GObject.BindingFlags.SYNC_CREATE)
+        box.sub.set_visible(not node.is_group)
 
     def _row_unbind(self, _f, item):
         box = item.get_child().get_child()
-        if getattr(box, "binding", None):
-            box.binding.unbind()
-            box.binding = None
+        for name in ("binding", "sub_binding"):
+            if getattr(box, name, None):
+                getattr(box, name).unbind()
+                setattr(box, name, None)
 
     def _row_activated(self, _view, pos):
         node = self.sel.get_item(pos).get_item()
@@ -466,62 +594,233 @@ class Grove(Adw.ApplicationWindow):
 
     def project_page(self, node):
         d = node.data
+        if self.readme_text(d) is None and d["url"]:
+            self.fetch_readme(d, lambda: self._refresh_if_current(d))
         page = Adw.PreferencesPage()
 
+        # what is this?
+        about = Adw.PreferencesGroup()
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, css_classes=["card"])
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=14,
+                        margin_bottom=14, margin_start=16, margin_end=16)
+        card.append(inner)
+        title = Gtk.Label(xalign=0, wrap=True, css_classes=["title-2"])
+        node.bind_property("title", title, "label", GObject.BindingFlags.SYNC_CREATE)
+        inner.append(title)
+        meta = [d.get("language"), "Private" if d.get("private") else "Public" if d["url"] else None,
+                f"Updated {d['updated']}" if d.get("updated") else None]
+        meta = " · ".join(m for m in meta if m)
+        if meta:
+            inner.append(Gtk.Label(label=meta, xalign=0, css_classes=["dim-label", "caption"]))
+        text = self.readme_text(d)
+        summary, bullets = summarize(text) if text else ("", [])
+        if summary:
+            blurb = summary
+        elif d["id"] in self.fetching:
+            blurb = "Reading the README…"
+        elif d["description"]:
+            blurb = d["description"]
+        elif text == "":
+            blurb = "This repo has no README yet, so there's nothing to explain."
+        else:
+            blurb = "No README to read yet. Add a repository URL or a folder and Grove will summarise it."
+        inner.append(Gtk.Label(label=blurb, xalign=0, wrap=True, selectable=True))
+        if bullets:
+            inner.append(Gtk.Label(label="\n".join("•  " + b for b in bullets), xalign=0,
+                                   wrap=True, selectable=True))
+        if text:
+            row = Gtk.Box(spacing=8, margin_top=4)
+            read = Gtk.Button(label=self.T("Read full README"))
+            read.connect("clicked", lambda *_: self.show_readme(d))
+            row.append(read)
+            if d["url"]:
+                again = Gtk.Button(icon_name="view-refresh-symbolic", css_classes=["flat"],
+                                   tooltip_text="Download the README again")
+                again.connect("clicked", lambda *_: self.refetch(d))
+                row.append(again)
+            inner.append(row)
+        about.add(card)
+        page.add(about)
+
+        # launch
         launch = Adw.PreferencesGroup()
         bar = Gtk.Box(spacing=8, homogeneous=True)
-        for icon, label, fn, css in [
-            ("document-edit-symbolic", "Editor", lambda *_: self.open_editor(d), []),
-            ("utilities-terminal-symbolic", "Terminal", lambda *_: self.open_terminal(d), []),
-            ("system-software-install-symbolic", "Install", lambda *_: self.install(d), []),
-            ("media-playback-start-symbolic", "Run", lambda *_: self.run_project(d),
-             ["suggested-action"]),
-            ("folder-open-symbolic", "Files", lambda *_: self.open_folder(d), []),
-            ("web-browser-symbolic", "GitHub", lambda *_: self.open_url(d), []),
+        for icon, label, tip, fn, css in [
+            ("document-edit-symbolic", "Editor", "Open the project folder in your editor",
+             lambda *_: self.open_editor(d), []),
+            ("utilities-terminal-symbolic", "Terminal", "Open a terminal in the project folder",
+             lambda *_: self.open_terminal(d), []),
+            ("system-software-install-symbolic", "Install", "Download it if needed, then run the install command",
+             lambda *_: self.install(d), []),
+            ("media-playback-start-symbolic", "Run", "Run the project in a terminal",
+             lambda *_: self.run_project(d), ["suggested-action"]),
+            ("folder-open-symbolic", "Files", "Open the folder in your file manager",
+             lambda *_: self.open_folder(d), []),
+            ("web-browser-symbolic", "GitHub", "Open the repository page in your browser",
+             lambda *_: self.open_url(d), []),
         ]:
-            b = Gtk.Button(child=Adw.ButtonContent(icon_name=icon, label=self.T(label)), css_classes=css)
+            b = Gtk.Button(child=Adw.ButtonContent(icon_name=icon, label=self.T(label)),
+                           css_classes=css, tooltip_text=tip)
             b.connect("clicked", fn)
             bar.append(b)
         launch.add(bar)
         page.add(launch)
 
-        info = Adw.PreferencesGroup(title=self.T("Project"))
-        info.add(self.entry("Name", d, "name", node))
-        info.add(self.entry("Repository URL", d, "url"))
-        info.add(self.entry("Description", d, "description"))
-        info.add(self.parent_combo(d))
-        page.add(info)
+        if d["url"] and not self.cloned(d):
+            where = d["path"] or os.path.join(self.settings["projects_dir"], d["name"])
+            nudge = Adw.PreferencesGroup()
+            clone = Adw.ActionRow(title="Not on this computer yet", subtitle=f"Clone downloads it to {where}")
+            btn = Gtk.Button(label="Clone", valign=Gtk.Align.CENTER, css_classes=["suggested-action"])
+            btn.connect("clicked", lambda b: self.clone(d, b))
+            clone.add_suffix(btn)
+            nudge.add(clone)
+            page.add(nudge)
 
-        local = Adw.PreferencesGroup(title=self.T("Local"))
+        # advanced, tucked away
+        adv = Adw.PreferencesGroup()
+        exp = Adw.ExpanderRow(title=self.T("Edit details and commands"),
+                              subtitle="Name, group, folder, install and run commands")
+        exp.add_row(self.entry("Name", d, "name", node))
+        exp.add_row(self.entry("Repository URL", d, "url"))
+        exp.add_row(self.entry("Description", d, "description"))
+        exp.add_row(self.parent_combo(d))
         path_row = self.entry("Folder", d, "path")
         pick = Gtk.Button(icon_name="folder-open-symbolic", valign=Gtk.Align.CENTER,
                           css_classes=["flat"], tooltip_text="Choose folder")
         pick.connect("clicked", lambda *_: self.pick_folder(d, path_row))
         path_row.add_suffix(pick)
-        local.add(path_row)
+        exp.add_row(path_row)
         install_row = self.entry("Install command (runs in a terminal)", d, "install")
         run_row = self.entry("Run command (runs in a terminal)", d, "run")
         detect_btn = Gtk.Button(icon_name="system-search-symbolic", valign=Gtk.Align.CENTER,
                                 css_classes=["flat"], tooltip_text="Detect install and run commands")
         detect_btn.connect("clicked", lambda *_: self.detect_into(d, install_row, run_row, force=True))
         install_row.add_suffix(detect_btn)
-        local.add(install_row)
-        local.add(run_row)
-        if d["url"] and not self.cloned(d):
-            clone = Adw.ActionRow(title="Not cloned yet", subtitle="Clone into the folder above, "
-                                  f"or {self.settings['projects_dir']}/{d['name']} if empty")
-            btn = Gtk.Button(label="Clone", valign=Gtk.Align.CENTER, css_classes=["suggested-action"])
-            btn.connect("clicked", lambda b: self.clone(d, b))
-            clone.add_suffix(btn)
-            local.add(clone)
-        page.add(local)
-
-        danger = Adw.PreferencesGroup()
-        rm = Gtk.Button(label="Remove from Grove", css_classes=["destructive-action"], halign=Gtk.Align.START)
+        exp.add_row(install_row)
+        exp.add_row(run_row)
+        rm_row = Adw.ActionRow(title="Remove from Grove", subtitle="Only removes this entry; files on disk stay")
+        rm = Gtk.Button(label="Remove", valign=Gtk.Align.CENTER, css_classes=["destructive-action"])
         rm.connect("clicked", lambda *_: self.remove(d))
-        danger.add(rm)
-        page.add(danger)
+        rm_row.add_suffix(rm)
+        exp.add_row(rm_row)
+        adv.add(exp)
+        page.add(adv)
         return page
+
+    # ---- readmes -------------------------------------------------------
+    def readme_text(self, d):
+        """README markdown for a project; "" if it has none, None if not known yet."""
+        path = os.path.expanduser(d["path"]) if d["path"] else ""
+        if path and os.path.isdir(path):
+            for name in sorted(os.listdir(path)):
+                if name.lower().startswith("readme"):
+                    try:
+                        with open(os.path.join(path, name), errors="replace") as f:
+                            return f.read()
+                    except OSError:
+                        pass
+        if d["id"] not in self.readmes:
+            try:
+                with open(os.path.join(CACHE_DIR, d["id"] + ".md")) as f:
+                    self.readmes[d["id"]] = f.read()
+            except OSError:
+                return None
+        return self.readmes[d["id"]]
+
+    def blurb(self, d):
+        """One-line description for the sidebar."""
+        if d.get("description"):
+            return d["description"]
+        text = self.readme_text(d)
+        summary = summarize(text)[0] if text else ""
+        return summary[:90] + ("…" if len(summary) > 90 else "")
+
+    def search_store(self):
+        store = Gio.ListStore(item_type=Node)
+        for d, *_ in sorted(walk(self.tree), key=lambda t: t[0]["name"].lower()):
+            if d["type"] != "project":
+                continue
+            text = self.readme_text(d)
+            hay = " ".join([d["name"], d.get("description", ""), d.get("language", ""),
+                            summarize(text)[0] if text else ""]).lower()
+            if self.query in hay:
+                store.append(Node(d, None, self.blurb(d)))
+        return store
+
+    def refresh_subtitles(self):
+        if not self.sel:
+            return
+        model = self.sel.get_model()
+        for i in range(model.get_n_items()):
+            node = model.get_item(i).get_item()
+            if not node.is_group:
+                node.props.subtitle = self.blurb(node.data)
+
+    def _refresh_if_current(self, d):
+        cur = self.current()
+        if cur and cur.data["id"] == d["id"]:
+            self.show_detail()
+        self.refresh_subtitles()
+
+    def fetch_readme(self, d, then=None):
+        slug = repo_slug(d["url"])
+        if not slug or not shutil.which("gh") or d["id"] in self.fetching:
+            if then:
+                then()
+            return
+        self.fetching.add(d["id"])
+
+        def done(proc, out, err):
+            self.fetching.discard(d["id"])
+            ok = proc.get_exit_status() == 0
+            if ok or "404" in (err or ""):  # a 404 means the repo has no README
+                text = base64.b64decode(out).decode("utf-8", "replace") if ok else ""
+                os.makedirs(CACHE_DIR, exist_ok=True)
+                with open(os.path.join(CACHE_DIR, d["id"] + ".md"), "w") as f:
+                    f.write(text)
+                self.readmes[d["id"]] = text
+            if then:
+                then()
+        self.run_async(["gh", "api", f"repos/{slug}/readme", "--jq", ".content"], done)
+
+    def refetch(self, d):
+        self.readmes.pop(d["id"], None)
+        try:
+            os.remove(os.path.join(CACHE_DIR, d["id"] + ".md"))
+        except OSError:
+            pass
+        self.fetch_readme(d, lambda: self._refresh_if_current(d))
+        self.show_detail()
+
+    def prefetch_readmes(self, force=False):
+        """Download READMEs for every project in the background, one at a time."""
+        todo = [d for d, *_ in walk(self.tree) if d["type"] == "project" and d["url"]
+                and (force or self.readme_text(d) is None)]
+        if force:
+            for d in todo:
+                self.readmes.pop(d["id"], None)
+
+        def nxt():
+            self.refresh_subtitles()
+            if todo:
+                self.fetch_readme(todo.pop(0), nxt)
+            elif force:
+                self.toast("READMEs refreshed")
+                self.show_detail()
+        if todo:
+            nxt()
+
+    def show_readme(self, d):
+        buf = Gtk.TextBuffer()
+        render_markdown(buf, self.readme_text(d) or "")
+        view = Gtk.TextView(buffer=buf, editable=False, cursor_visible=False,
+                            wrap_mode=Gtk.WrapMode.WORD_CHAR, left_margin=18, right_margin=18,
+                            top_margin=12, bottom_margin=18)
+        tv = Adw.ToolbarView(content=Gtk.ScrolledWindow(child=view), css_classes=["readme"])
+        tv.add_top_bar(Adw.HeaderBar())
+        dlg = Adw.Dialog(title=f"{d['name']}: README", content_width=720, content_height=640)
+        dlg.set_child(tv)
+        dlg.present(self)
 
     def group_page(self, node):
         d = node.data
@@ -689,7 +988,7 @@ class Grove(Adw.ApplicationWindow):
     def sync(self):
         self.toast("Fetching repos from GitHub…")
         self.run_async(["gh", "repo", "list", "--limit", "500", "--json",
-                        "name,url,description,isPrivate,isArchived"], self._synced)
+                        "name,url,description,isPrivate,isArchived,primaryLanguage,updatedAt"], self._synced)
 
     def _synced(self, proc, out, err):
         if proc.get_exit_status() != 0:
@@ -701,7 +1000,9 @@ class Grove(Adw.ApplicationWindow):
         added = 0
         for r in json.loads(out):
             if r["url"] in known:
-                known[r["url"]].update(description=r["description"] or "", private=r["isPrivate"])
+                known[r["url"]].update(description=r["description"] or "", private=r["isPrivate"],
+                                       language=(r.get("primaryLanguage") or {}).get("name", ""),
+                                       updated=(r.get("updatedAt") or "")[:10])
                 continue
             if r["isArchived"]:
                 continue
@@ -711,9 +1012,12 @@ class Grove(Adw.ApplicationWindow):
             guess = os.path.join(self.settings["projects_dir"], r["name"])
             inbox["children"].append(new_project(
                 r["name"], url=r["url"], description=r["description"] or "",
-                private=r["isPrivate"], path=guess if os.path.isdir(guess) else ""))
+                private=r["isPrivate"], path=guess if os.path.isdir(guess) else "",
+                language=(r.get("primaryLanguage") or {}).get("name", ""),
+                updated=(r.get("updatedAt") or "")[:10]))
             added += 1
         self.rebuild()
+        self.prefetch_readmes()
         self.toast(f"Added {added} new repo{'s' if added != 1 else ''}" if added else "Already up to date")
 
     def clone(self, d, button, then=None):
