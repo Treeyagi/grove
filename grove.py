@@ -126,7 +126,7 @@ def new_group(name):
 
 def new_project(name, **kw):
     return {"type": "project", "id": new_id(), "name": name, "url": "",
-            "description": "", "path": "", "install": "", "run": "", "private": False, **kw}
+            "description": "", "path": "", "install": "", "run": "", "site": "", "private": False, **kw}
 
 
 def walk(items, parent=None):
@@ -189,6 +189,16 @@ def spawn(argv, cwd=None):
 def repo_slug(url):
     m = re.match(r"https?://github\.com/([^/]+/[^/#?]+?)(?:\.git)?/?$", url or "")
     return m.group(1) if m else None
+
+
+def pages_url(url):
+    """Where a repo's GitHub Pages site would live (owner.github.io/repo/)."""
+    slug = repo_slug(url)
+    if not slug:
+        return None
+    owner, repo = slug.split("/")
+    host = f"{owner.lower()}.github.io"
+    return f"https://{host}/" if repo.lower() == host else f"https://{host}/{repo}/"
 
 
 def clean_inline(t):
@@ -367,6 +377,7 @@ class Grove(Adw.ApplicationWindow):
         self.rebuild()
         GLib.idle_add(self.auto_sync)
         GLib.idle_add(self.prefetch_readmes)
+        GLib.idle_add(self.check_all_sites)
 
     def _on_search(self, entry):
         self.query = entry.get_text().strip().lower()
@@ -617,7 +628,8 @@ class Grove(Adw.ApplicationWindow):
         node.bind_property("title", title, "label", GObject.BindingFlags.SYNC_CREATE)
         inner.append(title)
         meta = [d.get("language"), "Private" if d.get("private") else "Public" if d["url"] else None,
-                f"Updated {d['updated']}" if d.get("updated") else None]
+                f"Updated {d['updated']}" if d.get("updated") else None,
+                "Live site" if d.get("site") else None]
         meta = " · ".join(m for m in meta if m)
         if meta:
             inner.append(Gtk.Label(label=meta, xalign=0, css_classes=["dim-label", "caption"]))
@@ -661,13 +673,14 @@ class Grove(Adw.ApplicationWindow):
              lambda *_: self.open_terminal(d), []),
             ("system-software-install-symbolic", "Install", "Download it first if needed, then install it",
              lambda b: self.install(d, b), []),
-            ("media-playback-start-symbolic", "Run", "Run it in a terminal (downloads and installs it first if needed)",
+            ("media-playback-start-symbolic", "Run", "Run it (opens the live site for deployed web projects; otherwise runs in a terminal)",
              lambda b: self.run_project(d, b), ["suggested-action"]),
             ("folder-open-symbolic", "Files", "Open the folder in your file manager",
              lambda *_: self.open_folder(d), []),
             ("web-browser-symbolic", "GitHub", "Open the repository page in your browser",
              lambda *_: self.open_url(d), []),
-        ]:
+        ] + ([("applications-internet-symbolic", "Live", "Open the deployed site (GitHub Pages)",
+               lambda *_: self.open_site(d), [])] if d.get("site") else []):
             b = Gtk.Button(child=Adw.ButtonContent(icon_name=icon, label=self.T(label)),
                            css_classes=css, tooltip_text=tip)
             b.connect("clicked", fn)
@@ -834,6 +847,33 @@ class Grove(Adw.ApplicationWindow):
         if todo:
             nxt()
 
+    def check_site(self, d, then=None):
+        """Note whether the repo has a live GitHub Pages site (no login needed)."""
+        url = pages_url(d["url"])
+        if not url or d.get("private"):
+            d["site"], d["site_checked"] = "", time.time()
+            if then:
+                then()
+            return
+
+        def done(proc, out, err):
+            d["site"] = url if (out or "").strip() == "200" else ""
+            d["site_checked"] = time.time()
+            self.save()
+            self._refresh_if_current(d)
+            if then:
+                then()
+        self.run_async(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-L", "--max-time", "8", url], done)
+
+    def check_all_sites(self):
+        todo = [d for d, *_ in walk(self.tree) if d["type"] == "project" and d["url"]
+                and time.time() - d.get("site_checked", 0) > 86400]
+
+        def nxt():
+            if todo:
+                self.check_site(todo.pop(0), nxt)
+        nxt()
+
     def show_readme(self, d):
         buf = Gtk.TextBuffer()
         render_markdown(buf, self.readme_text(d) or "")
@@ -956,7 +996,17 @@ class Grove(Adw.ApplicationWindow):
             return
         self.open_terminal(d, d["install"])
 
+    def open_site(self, d):
+        if d.get("site"):
+            self.report(spawn(["xdg-open", d["site"]]))
+
     def run_project(self, d, button=None):
+        if d.get("site") and not d.get("run"):  # a deployed web project: "run" means open it
+            if self.cloned(d):
+                self.fill_missing(d)
+            if not d.get("run"):
+                self.open_site(d)
+                return
         if not self.cloned(d):
             if not d["url"]:
                 self.toast("Set a repository URL or folder first")
@@ -969,7 +1019,13 @@ class Grove(Adw.ApplicationWindow):
         self.fill_missing(d)
         steps = [c for c in ((d.get("install") if with_install else ""), d.get("run")) if c]
         if not d.get("run"):
-            self.toast("No run command: set one (or press detect)")
+            index = os.path.join(os.path.expanduser(d["path"]), "index.html")
+            if os.path.exists(index):  # plain static page: open it in the browser
+                self.report(spawn(["xdg-open", index]))
+                if not steps:
+                    return
+            else:
+                self.toast("No run command: set one (or press detect)")
         if steps:
             self.open_terminal(d, " && ".join(steps))
 
@@ -1095,6 +1151,7 @@ class Grove(Adw.ApplicationWindow):
         self.data["last_sync"] = time.time()
         self.rebuild()
         self.prefetch_readmes()
+        self.check_all_sites()
         n = self._added
         if not self._quiet:
             self.toast(f"Added {n} new repo{'s' if n != 1 else ''}" if n else "Already up to date")
