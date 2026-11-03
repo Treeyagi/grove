@@ -336,12 +336,16 @@ class Grove(Adw.ApplicationWindow):
         header.pack_start(add_grp)
         menu = Gio.Menu()
         menu.append("Re-read all READMEs", "win.readmes")
+        menu.append("Bring back removed repos", "win.restore")
         menu.append("Hackers theme", "win.hackers")
         menu.append("Settings", "win.settings")
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu))
         act = Gio.SimpleAction.new("settings", None)
         act.connect("activate", lambda *_: self.show_settings())
         self.add_action(act)
+        restore = Gio.SimpleAction.new("restore", None)
+        restore.connect("activate", lambda *_: self.restore_removed())
+        self.add_action(restore)
         reread = Gio.SimpleAction.new("readmes", None)
         reread.connect("activate", lambda *_: self.prefetch_readmes(force=True))
         self.add_action(reread)
@@ -362,6 +366,16 @@ class Grove(Adw.ApplicationWindow):
                                       margin_end=8, margin_bottom=8)
         self.search.connect("search-changed", self._on_search)
         side.add_top_bar(self.search)
+        bottom = Gtk.ActionBar()
+        rm_btn = Gtk.Button(icon_name="user-trash-symbolic", tooltip_text="Remove the selected repo or group (Delete)",
+                            css_classes=["flat"])
+        rm_btn.connect("clicked", lambda *_: self.remove_selected())
+        bottom.pack_start(rm_btn)
+        side.add_bottom_bar(bottom)
+        keys = Gtk.ShortcutController()
+        keys.add_shortcut(Gtk.Shortcut.new(Gtk.ShortcutTrigger.parse_string("Delete"),
+                                           Gtk.CallbackAction.new(lambda *_: self.remove_selected() or True)))
+        self.view.add_controller(keys)
         self.side_page = Adw.NavigationPage(title="Projects", child=side)
         split.set_sidebar(self.side_page)
 
@@ -727,13 +741,15 @@ class Grove(Adw.ApplicationWindow):
         install_row.add_suffix(detect_btn)
         exp.add_row(install_row)
         exp.add_row(run_row)
-        rm_row = Adw.ActionRow(title="Remove from Grove", subtitle="Only removes this entry; files on disk stay")
-        rm = Gtk.Button(label="Remove", valign=Gtk.Align.CENTER, css_classes=["destructive-action"])
-        rm.connect("clicked", lambda *_: self.remove(d))
-        rm_row.add_suffix(rm)
-        exp.add_row(rm_row)
         adv.add(exp)
         page.add(adv)
+
+        gone = Adw.PreferencesGroup()
+        rm = Gtk.Button(label=self.T("Remove this repo…"), css_classes=["destructive-action"],
+                        halign=Gtk.Align.START, tooltip_text="Take it off your list (Delete key)")
+        rm.connect("clicked", lambda *_: self.confirm_remove(d))
+        gone.add(rm)
+        page.add(gone)
         return page
 
     # ---- readmes -------------------------------------------------------
@@ -916,8 +932,8 @@ class Grove(Adw.ApplicationWindow):
         add_p.connect("clicked", lambda *_: self.add_project())
         add_g = Gtk.Button(label="Add subgroup")
         add_g.connect("clicked", lambda *_: self.add_group())
-        rm = Gtk.Button(label="Delete group", css_classes=["destructive-action"])
-        rm.connect("clicked", lambda *_: self.remove(d))
+        rm = Gtk.Button(label="Delete group…", css_classes=["destructive-action"])
+        rm.connect("clicked", lambda *_: self.confirm_remove(d))
         for b in (add_p, add_g) if d.get("pinned") else (add_p, add_g, rm):
             box.append(b)
         acts.add(box)
@@ -947,15 +963,86 @@ class Grove(Adw.ApplicationWindow):
         (grp["children"] if grp else self.tree).append(p)
         self.rebuild(p["id"])
 
-    def remove(self, d):
+    def remove_selected(self):
+        node = self.current()
+        if node is None:
+            self.toast("Select a repo or group first")
+        else:
+            self.confirm_remove(node.data)
+
+    def local_copy(self, d):
+        """(path, has_changes) for a clone Grove may offer to delete, else None.
+
+        Only a git checkout whose origin is this very repo qualifies, so a stray folder
+        (or anything like ~/Downloads) is never offered."""
+        path = os.path.realpath(os.path.expanduser(d["path"])) if d.get("path") else ""
+        home = os.path.realpath(os.path.expanduser("~"))
+        slug = repo_slug(d.get("url"))
+        if not (path and slug and os.path.isdir(os.path.join(path, ".git"))):
+            return None
+        if path == home or home.startswith(path + os.sep):
+            return None
+
+        def git(*args):
+            return subprocess.run(["git", "-C", path, *args], capture_output=True, text=True,
+                                  timeout=10).stdout.strip()
+        try:
+            remote, dirty = git("remote", "get-url", "origin"), bool(git("status", "--porcelain"))
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return (path, dirty) if slug.lower() in remote.lower() else None
+
+    def confirm_remove(self, d):
+        if d["type"] == "group":
+            body = "The group goes away; the repos inside move up one level."
+            local = None
+        else:
+            body = "This takes it off your Grove list. The GitHub repo and your files stay untouched."
+            local = self.local_copy(d)
+        dlg = Adw.AlertDialog(heading=f"Remove {d['name']}?", body=body)
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("remove", "Remove from list")
+        dlg.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
+        if local:
+            path, dirty = local
+            dlg.set_body(body + f"\n\nThere is a copy on this computer:\n{path}"
+                         + ("\nIt has uncommitted changes that would be lost." if dirty else ""))
+            dlg.add_response("delete", "Remove and delete local copy")
+            dlg.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+        dlg.set_default_response("cancel")
+        dlg.set_close_response("cancel")
+        dlg.connect("response", lambda _d, r: r != "cancel" and self.remove(d, delete_local=(r == "delete")))
+        dlg.present(self)
+
+    def remove(self, d, delete_local=False):
+        note = ""
+        if d["type"] == "project":
+            local = self.local_copy(d) if delete_local else None
+            if local:  # re-checked here, right before deleting
+                shutil.rmtree(local[0], ignore_errors=True)
+                note = " and deleted its local copy"
+            if d.get("url"):  # keep it gone: otherwise the next sync would add it straight back
+                self.data.setdefault("hidden", [])
+                if d["url"] not in self.data["hidden"]:
+                    self.data["hidden"].append(d["url"])
         _, sibs, parent = self.find(d["id"])
         sibs.remove(d)
         if d["type"] == "group":
             sibs.extend(d["children"])
         self.expanded.discard(d["id"])
+        self.sel.set_selected(Gtk.INVALID_LIST_POSITION)
         self.rebuild(parent["id"] if parent else None)
-        self.sel.set_selected(Gtk.INVALID_LIST_POSITION) if not parent else None
-        self.toast(f"Removed {d['name']}" + ("" if d["type"] == "group" else " (files on disk untouched)"))
+        if not parent:
+            self.sel.set_selected(Gtk.INVALID_LIST_POSITION)
+        self.toast(f"Removed {d['name']}{note}")
+
+    def restore_removed(self):
+        n = len(self.data.get("hidden", []))
+        self.data["hidden"] = []
+        self.save()
+        self.toast(f"Brought back {n} removed repo{'s' if n != 1 else ''}" if n else "Nothing was removed")
+        if n:
+            self.sync()
 
     # ---- launching ---------------------------------------------------
     def project_dir(self, d):
@@ -1178,6 +1265,7 @@ class Grove(Adw.ApplicationWindow):
         if self.settings.get("public_only"):
             repos = [r for r in repos if not r["isPrivate"]]
         known = {d["url"]: d for d, *_ in walk(self.tree) if d["type"] == "project"}
+        hidden = set(self.data.get("hidden", []))
         grp = next((d for d in self.tree
                     if d["type"] == "group" and d["name"].lower() == group_name.lower()), None)
         if grp and pinned:
@@ -1190,7 +1278,7 @@ class Grove(Adw.ApplicationWindow):
                 known[r["url"]].update(description=r["description"] or "", private=r["isPrivate"],
                                        language=lang, updated=updated)
                 continue
-            if r["isArchived"]:
+            if r["isArchived"] or r["url"] in hidden:
                 continue
             if grp is None:
                 grp = new_group(group_name)

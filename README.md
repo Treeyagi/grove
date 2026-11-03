@@ -36,6 +36,9 @@ Options go after `sh -s --`, for example `... | sh -s -- --no-launch` or `... | 
 - Projects deployed to GitHub Pages get a **Live** button, and **Run** opens the live site (no clone needed).
 - **Install** and **Run** download the repo first if it isn't on your computer yet. Run on a new repo does the
   whole chain in one terminal: clone, install, then run.
+- **Remove** a repo with the trash button under the tree, the Delete key, or the button on its page. Grove asks first,
+  and for a clone it can also delete the local copy (only a git checkout of that exact repo, with a warning if it
+  has uncommitted changes). Removed repos stay gone after a sync; ☰ → *Bring back removed repos* undoes it.
 - Settings (editor, terminal, projects folder) are in the ☰ menu. Your data lives in `~/.config/grove/config.json`.
 
 ## Whose repos does it show?
