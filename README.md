@@ -21,7 +21,8 @@ Options go after `sh -s --`, for example `... | sh -s -- --no-launch` or `... | 
   - Arch/CachyOS: `sudo pacman -S --needed python-gobject gtk4 libadwaita`
   - Debian/Ubuntu: `sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1`
   - Fedora: `sudo dnf install python3-gobject gtk4 libadwaita`
-- [`gh`](https://cli.github.com) signed in (`gh auth login`) to sync and clone your repos
+- [`gh`](https://cli.github.com) signed in (`gh auth login`) to sync and clone your repos, **or** no login at all:
+  enter a GitHub username in Settings and Grove lists that account's public repos
 
 ## Using it
 
@@ -32,5 +33,11 @@ Options go after `sh -s --`, for example `... | sh -s -- --no-launch` or `... | 
   commands are detected from the repo (npm, cargo, go, Python, make, `install.sh`) and can be edited.
 - Install clones the repo first if it is not on disk yet.
 - Settings (editor, terminal, projects folder) are in the ☰ menu. Your data lives in `~/.config/grove/config.json`.
+
+## Privacy
+
+Grove only shows repos the signed-in `gh` account can see; your list stays in `~/.config/grove` on your own
+computer. In Settings, turn on **Public repos only** to never import private repos, or set a **GitHub username**
+to sync just that account's public repos (no login needed).
 
 Run without installing: `python3 grove.py`

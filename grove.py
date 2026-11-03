@@ -108,6 +108,8 @@ def default_settings():
         "terminal": detect(list(TERMINAL_FLAGS), "xterm"),
         "projects_dir": os.path.expanduser("~/Projects"),
         "hackers": True,
+        "github_user": "",     # sync this account's public repos (works without gh)
+        "public_only": False,  # never import private repos
     }
 
 
@@ -764,23 +766,43 @@ class Grove(Adw.ApplicationWindow):
 
     def fetch_readme(self, d, then=None):
         slug = repo_slug(d["url"])
-        if not slug or not shutil.which("gh") or d["id"] in self.fetching:
+        if not slug or d["id"] in self.fetching:
             if then:
                 then()
             return
         self.fetching.add(d["id"])
 
-        def done(proc, out, err):
+        def finish(text):
             self.fetching.discard(d["id"])
-            ok = proc.get_exit_status() == 0
-            if ok or "404" in (err or ""):  # a 404 means the repo has no README
-                text = base64.b64decode(out).decode("utf-8", "replace") if ok else ""
+            if text is not None:
                 os.makedirs(CACHE_DIR, exist_ok=True)
                 with open(os.path.join(CACHE_DIR, d["id"] + ".md"), "w") as f:
                     f.write(text)
                 self.readmes[d["id"]] = text
             if then:
                 then()
+
+        def public_api():
+            # no gh, or gh can't see it: ask the public API (private repos just 404 here)
+            def done(proc, out, err):
+                if proc.get_exit_status() == 0:
+                    finish(out)
+                else:  # a public repo that 404s has no README; a private one is unknown
+                    finish("" if not d.get("private") and "404" in (err or "") else None)
+            self.run_async(["curl", "-fsSL", "-H", "Accept: application/vnd.github.raw+json",
+                            f"https://api.github.com/repos/{slug}/readme"], done)
+
+        if not shutil.which("gh"):
+            public_api()
+            return
+
+        def done(proc, out, err):
+            if proc.get_exit_status() == 0:
+                finish(base64.b64decode(out).decode("utf-8", "replace"))
+            elif "404" in (err or ""):  # signed in and still 404: the repo has no README
+                finish("")
+            else:
+                public_api()
         self.run_async(["gh", "api", f"repos/{slug}/readme", "--jq", ".content"], done)
 
     def refetch(self, d):
@@ -985,20 +1007,67 @@ class Grove(Adw.ApplicationWindow):
             return
         proc.communicate_utf8_async(None, None, lambda p, r: cb(p, *p.communicate_utf8_finish(r)[1:]))
 
+    REPO_FIELDS = "name,url,description,isPrivate,isArchived,primaryLanguage,updatedAt"
+
     def sync(self):
-        self.toast("Fetching repos from GitHub…")
-        self.run_async(["gh", "repo", "list", "--limit", "500", "--json",
-                        "name,url,description,isPrivate,isArchived,primaryLanguage,updatedAt"], self._synced)
+        user = self.settings.get("github_user", "").strip()
+        self.toast(f"Fetching {'public ' if self.settings.get('public_only') or user else ''}repos from GitHub…")
+        if not shutil.which("gh"):
+            if user:
+                self.sync_public_api(user)
+            else:
+                self.toast("Install gh and sign in, or enter a GitHub username in Settings")
+            return
+        argv = ["gh", "repo", "list"] + ([user] if user else []) + ["--limit", "500", "--json", self.REPO_FIELDS]
+        if self.settings.get("public_only"):
+            argv += ["--visibility", "public"]
+
+        def done(proc, out, err):
+            if proc.get_exit_status() != 0 and user:
+                self.sync_public_api(user)  # gh not signed in: the public API still works
+            else:
+                self._synced(proc, out, err)
+        self.run_async(argv, done)
+
+    def sync_public_api(self, user):
+        """List a user's public repos through GitHub's REST API, with no login."""
+        repos = []
+
+        def page(n):
+            url = f"https://api.github.com/users/{user}/repos?per_page=100&type=owner&sort=updated&page={n}"
+            self.run_async(["curl", "-fsSL", "-H", "Accept: application/vnd.github+json", url],
+                           lambda proc, out, err: got(n, proc, out))
+
+        def got(n, proc, out):
+            if proc.get_exit_status() != 0:
+                self.toast(f"Couldn't read public repos for '{user}' (check the name, or the rate limit)")
+                return
+            batch = json.loads(out)
+            repos.extend({"name": r["name"], "url": r["html_url"], "description": r["description"],
+                          "isPrivate": False, "isArchived": r["archived"],
+                          "primaryLanguage": {"name": r["language"]} if r["language"] else None,
+                          "updatedAt": r["pushed_at"] or r["updated_at"]}
+                         for r in batch if not r["private"])
+            if len(batch) == 100 and n < 5:
+                page(n + 1)
+            else:
+                self._import(repos)
+        page(1)
 
     def _synced(self, proc, out, err):
         if proc.get_exit_status() != 0:
             lines = (err or "").strip().splitlines()
             self.toast(lines[-1] if lines else "gh failed (is it installed and logged in?)")
             return
+        self._import(json.loads(out))
+
+    def _import(self, repos):
+        if self.settings.get("public_only"):
+            repos = [r for r in repos if not r["isPrivate"]]
         known = {d["url"]: d for d, *_ in walk(self.tree) if d["type"] == "project"}
         inbox = next((d for d in self.tree if d["type"] == "group" and d["name"] == INBOX), None)
         added = 0
-        for r in json.loads(out):
+        for r in repos:
             if r["url"] in known:
                 known[r["url"]].update(description=r["description"] or "", private=r["isPrivate"],
                                        language=(r.get("primaryLanguage") or {}).get("name", ""),
@@ -1053,6 +1122,12 @@ class Grove(Adw.ApplicationWindow):
                            ("projects_dir", "Projects folder")]:
             rows[key] = Adw.EntryRow(title=title, text=s[key])
             lst.append(rows[key])
+        user_row = Adw.EntryRow(title="GitHub username to sync (optional, works without gh)",
+                                text=s.get("github_user", ""))
+        pub_row = Adw.SwitchRow(title="Public repos only", active=s.get("public_only", False),
+                                subtitle="Never import private repositories")
+        lst.append(user_row)
+        lst.append(pub_row)
         dlg = Adw.AlertDialog(heading="Settings", extra_child=lst)
         dlg.add_response("cancel", "Cancel")
         dlg.add_response("save", "Save")
@@ -1063,6 +1138,8 @@ class Grove(Adw.ApplicationWindow):
                 for k, row in rows.items():
                     if row.get_text().strip():
                         s[k] = row.get_text().strip()
+                s["github_user"] = user_row.get_text().strip()
+                s["public_only"] = pub_row.get_active()
                 self.save()
         dlg.connect("response", resp)
         dlg.present(self)
