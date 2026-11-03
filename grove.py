@@ -305,7 +305,7 @@ class Grove(Adw.ApplicationWindow):
         self.expanded = set(self.data.get("expanded", []))
         self.query = ""
         self.readmes = {}        # project id -> README text ("" = repo has none)
-        self.fetching = set()    # project ids with a README download in flight
+        self.fetching = {}       # project id -> callbacks, for README downloads in flight
 
         self.toasts = Adw.ToastOverlay()
         self.set_content(self.toasts)
@@ -603,7 +603,7 @@ class Grove(Adw.ApplicationWindow):
 
     def project_page(self, node):
         d = node.data
-        if self.readme_text(d) is None and d["url"]:
+        if repo_slug(d["url"]) and d["id"] not in self.fetching and self.readme_text(d) is None:
             self.fetch_readme(d, lambda: self._refresh_if_current(d))
         page = Adw.PreferencesPage()
 
@@ -659,10 +659,10 @@ class Grove(Adw.ApplicationWindow):
              lambda *_: self.open_editor(d), []),
             ("utilities-terminal-symbolic", "Terminal", "Open a terminal in the project folder",
              lambda *_: self.open_terminal(d), []),
-            ("system-software-install-symbolic", "Install", "Download it if needed, then run the install command",
-             lambda *_: self.install(d), []),
-            ("media-playback-start-symbolic", "Run", "Run the project in a terminal",
-             lambda *_: self.run_project(d), ["suggested-action"]),
+            ("system-software-install-symbolic", "Install", "Download it first if needed, then install it",
+             lambda b: self.install(d, b), []),
+            ("media-playback-start-symbolic", "Run", "Run it in a terminal (downloads and installs it first if needed)",
+             lambda b: self.run_project(d, b), ["suggested-action"]),
             ("folder-open-symbolic", "Files", "Open the folder in your file manager",
              lambda *_: self.open_folder(d), []),
             ("web-browser-symbolic", "GitHub", "Open the repository page in your browser",
@@ -674,16 +674,6 @@ class Grove(Adw.ApplicationWindow):
             bar.append(b)
         launch.add(bar)
         page.add(launch)
-
-        if d["url"] and not self.cloned(d):
-            where = d["path"] or os.path.join(self.settings["projects_dir"], d["name"])
-            nudge = Adw.PreferencesGroup()
-            clone = Adw.ActionRow(title="Not on this computer yet", subtitle=f"Clone downloads it to {where}")
-            btn = Gtk.Button(label="Clone", valign=Gtk.Align.CENTER, css_classes=["suggested-action"])
-            btn.connect("clicked", lambda b: self.clone(d, b))
-            clone.add_suffix(btn)
-            nudge.add(clone)
-            page.add(nudge)
 
         # advanced, tucked away
         adv = Adw.PreferencesGroup()
@@ -773,21 +763,25 @@ class Grove(Adw.ApplicationWindow):
 
     def fetch_readme(self, d, then=None):
         slug = repo_slug(d["url"])
-        if not slug or d["id"] in self.fetching:
+        if not slug:
             if then:
                 then()
             return
-        self.fetching.add(d["id"])
+        if d["id"] in self.fetching:  # already downloading: just wait for it
+            if then:
+                self.fetching[d["id"]].append(then)
+            return
+        self.fetching[d["id"]] = [then] if then else []
 
         def finish(text):
-            self.fetching.discard(d["id"])
+            callbacks = self.fetching.pop(d["id"], [])
             if text is not None:
                 os.makedirs(CACHE_DIR, exist_ok=True)
                 with open(os.path.join(CACHE_DIR, d["id"] + ".md"), "w") as f:
                     f.write(text)
                 self.readmes[d["id"]] = text
-            if then:
-                then()
+            for cb in callbacks:
+                cb()
 
         def public_api():
             # no gh, or gh can't see it: ask the public API (private repos just 404 here)
@@ -832,7 +826,8 @@ class Grove(Adw.ApplicationWindow):
         def nxt():
             self.refresh_subtitles()
             if todo:
-                self.fetch_readme(todo.pop(0), nxt)
+                d = todo.pop(0)
+                self.fetch_readme(d, lambda: (self._refresh_if_current(d), nxt()))
             elif force:
                 self.toast("READMEs refreshed")
                 self.show_detail()
@@ -948,28 +943,35 @@ class Grove(Adw.ApplicationWindow):
         d["run"] = d.get("run") or run
         self.save()
 
-    def install(self, d):
+    def install(self, d, button=None):
         if not self.cloned(d):
             if not d["url"]:
                 self.toast("Set a repository URL or folder first")
                 return
-            self.clone(d, None, then=lambda: self.install(d))
+            self.clone(d, button, then=lambda: self.install(d))
             return
         self.fill_missing(d)
         if not d.get("install"):
-            self.toast("No install command: set one (or press detect)")
+            self.toast("No install step detected: it's ready to run, or set one by hand")
             return
         self.open_terminal(d, d["install"])
 
-    def run_project(self, d):
+    def run_project(self, d, button=None):
         if not self.cloned(d):
-            self.toast("Not cloned yet: press Install to clone and set it up")
+            if not d["url"]:
+                self.toast("Set a repository URL or folder first")
+                return
+            self.clone(d, button, then=lambda: self._launch(d, with_install=True))
             return
+        self._launch(d, with_install=False)
+
+    def _launch(self, d, with_install):
         self.fill_missing(d)
-        if not d["run"]:
+        steps = [c for c in ((d.get("install") if with_install else ""), d.get("run")) if c]
+        if not d.get("run"):
             self.toast("No run command: set one (or press detect)")
-            return
-        self.open_terminal(d, d["run"])
+        if steps:
+            self.open_terminal(d, " && ".join(steps))
 
     def cloned(self, d):
         return bool(d["path"]) and os.path.isdir(os.path.expanduser(d["path"]))
@@ -1135,7 +1137,8 @@ class Grove(Adw.ApplicationWindow):
         path = os.path.expanduser(d["path"])
         if button:
             button.set_sensitive(False)
-            button.set_label("Cloning…")
+            child = button.get_child()
+            (child.set_label if isinstance(child, Adw.ButtonContent) else button.set_label)("Cloning…")
         else:
             self.toast(f"Cloning {d['name']}…")
         tool = ["gh", "repo", "clone"] if shutil.which("gh") else ["git", "clone"]

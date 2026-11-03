@@ -31,7 +31,8 @@ Options go after `sh -s --`, for example `... | sh -s -- --no-launch` or `... | 
   and the tree shows a one-line blurb under each name. Use the search box to find a repo by what it does.
 - Each project has **Editor, Terminal, Install, Run, Files** and **GitHub** buttons. Install and Run
   commands are detected from the repo (npm, cargo, go, Python, make, `install.sh`) and can be edited.
-- Install clones the repo first if it is not on disk yet.
+- **Install** and **Run** download the repo first if it isn't on your computer yet. Run on a new repo does the
+  whole chain in one terminal: clone, install, then run.
 - Settings (editor, terminal, projects folder) are in the ☰ menu. Your data lives in `~/.config/grove/config.json`.
 
 ## Whose repos does it show?
