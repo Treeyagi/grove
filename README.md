@@ -34,10 +34,13 @@ Options go after `sh -s --`, for example `... | sh -s -- --no-launch` or `... | 
 - Install clones the repo first if it is not on disk yet.
 - Settings (editor, terminal, projects folder) are in the ☰ menu. Your data lives in `~/.config/grove/config.json`.
 
-## Privacy
+## Whose repos does it show?
 
-Grove only shows repos the signed-in `gh` account can see; your list stays in `~/.config/grove` on your own
-computer. In Settings, turn on **Public repos only** to never import private repos, or set a **GitHub username**
-to sync just that account's public repos (no login needed).
+- **Treeyagi's public repos are always first.** On every install Grove adds a pinned "Treeyagi" group and keeps it
+  fresh in the background, with no login needed.
+- **Follow other people:** ☰ → Settings → *Follow other GitHub users*. Each user gets their own group of public repos.
+- **Your own repos:** if `gh` is signed in, your repos land in an "Unsorted" group so you can sort them. Turn on
+  **Public repos only** to never import private ones.
+- Your list lives in `~/.config/grove` on your own computer; nothing is uploaded anywhere.
 
 Run without installing: `python3 grove.py`

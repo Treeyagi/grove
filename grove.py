@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 
 import gi
@@ -20,6 +21,8 @@ APP_ID = "io.github.grove.Launcher"
 CONFIG = os.path.join(GLib.get_user_config_dir(), "grove", "config.json")
 CACHE_DIR = os.path.join(GLib.get_user_cache_dir(), "grove", "readmes")
 INBOX = "Unsorted"
+FEATURED = "Treeyagi"  # always synced and pinned first, for everyone
+USERNAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 
 # argv inserted between the terminal executable and the command to run
 TERMINAL_FLAGS = {
@@ -108,7 +111,7 @@ def default_settings():
         "terminal": detect(list(TERMINAL_FLAGS), "xterm"),
         "projects_dir": os.path.expanduser("~/Projects"),
         "hackers": True,
-        "github_user": "",     # sync this account's public repos (works without gh)
+        "extra_users": [],     # other GitHub accounts whose public repos to follow
         "public_only": False,  # never import private repos
     }
 
@@ -286,7 +289,7 @@ class Node(GObject.Object):
 
 def build_store(items, blurb=lambda d: ""):
     store = Gio.ListStore(item_type=Node)
-    for d in sorted(items, key=lambda d: (d["type"] != "group", d["name"].lower())):
+    for d in sorted(items, key=lambda d: (d["type"] != "group", not d.get("pinned"), d["name"].lower())):
         if d["type"] == "group":
             store.append(Node(d, build_store(d["children"], blurb)))
         else:
@@ -362,6 +365,7 @@ class Grove(Adw.ApplicationWindow):
         self.load_css()
         self.apply_theme()
         self.rebuild()
+        GLib.idle_add(self.auto_sync)
         GLib.idle_add(self.prefetch_readmes)
 
     def _on_search(self, entry):
@@ -410,6 +414,9 @@ class Grove(Adw.ApplicationWindow):
             self.data = {}
         self.data.setdefault("tree", [])
         self.data["settings"] = {**default_settings(), **self.data.get("settings", {})}
+        old = self.data["settings"].pop("github_user", "")
+        if old and old not in self.data["settings"]["extra_users"]:
+            self.data["settings"]["extra_users"].append(old)
 
     def save(self):
         self.data["expanded"] = sorted(self.expanded)
@@ -859,10 +866,11 @@ class Grove(Adw.ApplicationWindow):
         add_g.connect("clicked", lambda *_: self.add_group())
         rm = Gtk.Button(label="Delete group", css_classes=["destructive-action"])
         rm.connect("clicked", lambda *_: self.remove(d))
-        for b in (add_p, add_g, rm):
+        for b in (add_p, add_g) if d.get("pinned") else (add_p, add_g, rm):
             box.append(b)
         acts.add(box)
-        acts.set_description("Deleting a group moves its contents up one level.")
+        acts.set_description("Pinned: this account's public repos always show first and re-sync automatically."
+                             if d.get("pinned") else "Deleting a group moves its contents up one level.")
         page.add(acts)
         return page
 
@@ -1009,27 +1017,51 @@ class Grove(Adw.ApplicationWindow):
 
     REPO_FIELDS = "name,url,description,isPrivate,isArchived,primaryLanguage,updatedAt"
 
+    def accounts(self):
+        """Featured account first, then any others the user follows."""
+        extra = [u for u in self.settings.get("extra_users", []) if u.lower() != FEATURED.lower()]
+        return [FEATURED] + extra
+
     def sync(self):
-        user = self.settings.get("github_user", "").strip()
-        self.toast(f"Fetching {'public ' if self.settings.get('public_only') or user else ''}repos from GitHub…")
-        if not shutil.which("gh"):
-            if user:
-                self.sync_public_api(user)
+        self._added, self._quiet = 0, False
+        self.toast("Fetching repos from GitHub…")
+        self.sync_accounts(self.sync_mine)
+
+    def auto_sync(self):
+        """Keep the featured account's group present and fresh without any login."""
+        has = any(d["type"] == "group" and d["name"].lower() == FEATURED.lower() for d in self.tree)
+        if not has or time.time() - self.data.get("last_sync", 0) > 12 * 3600:
+            self._added, self._quiet = 0, True
+            self.sync_accounts()
+
+    def sync_accounts(self, then=None):
+        users = self.accounts()
+
+        def nxt():
+            if users:
+                self.sync_public_api(users.pop(0), nxt)
+            elif then:
+                then()
             else:
-                self.toast("Install gh and sign in, or enter a GitHub username in Settings")
+                self.finish_sync()
+        nxt()
+
+    def sync_mine(self):
+        """The signed-in gh account's own repos (private ones too, unless public-only)."""
+        if not shutil.which("gh"):
+            self.finish_sync()
             return
-        argv = ["gh", "repo", "list"] + ([user] if user else []) + ["--limit", "500", "--json", self.REPO_FIELDS]
+        argv = ["gh", "repo", "list", "--limit", "500", "--json", self.REPO_FIELDS]
         if self.settings.get("public_only"):
             argv += ["--visibility", "public"]
 
         def done(proc, out, err):
-            if proc.get_exit_status() != 0 and user:
-                self.sync_public_api(user)  # gh not signed in: the public API still works
-            else:
-                self._synced(proc, out, err)
+            if proc.get_exit_status() == 0:
+                self._added += self._import(json.loads(out), INBOX)
+            self.finish_sync()
         self.run_async(argv, done)
 
-    def sync_public_api(self, user):
+    def sync_public_api(self, user, then):
         """List a user's public repos through GitHub's REST API, with no login."""
         repos = []
 
@@ -1040,7 +1072,9 @@ class Grove(Adw.ApplicationWindow):
 
         def got(n, proc, out):
             if proc.get_exit_status() != 0:
-                self.toast(f"Couldn't read public repos for '{user}' (check the name, or the rate limit)")
+                if not self._quiet:
+                    self.toast(f"Couldn't read public repos for '{user}' (check the name, or the rate limit)")
+                then()
                 return
             batch = json.loads(out)
             repos.extend({"name": r["name"], "url": r["html_url"], "description": r["description"],
@@ -1051,43 +1085,49 @@ class Grove(Adw.ApplicationWindow):
             if len(batch) == 100 and n < 5:
                 page(n + 1)
             else:
-                self._import(repos)
+                self._added += self._import(repos, user, pinned=user.lower() == FEATURED.lower())
+                then()
         page(1)
 
-    def _synced(self, proc, out, err):
-        if proc.get_exit_status() != 0:
-            lines = (err or "").strip().splitlines()
-            self.toast(lines[-1] if lines else "gh failed (is it installed and logged in?)")
-            return
-        self._import(json.loads(out))
+    def finish_sync(self):
+        self.data["last_sync"] = time.time()
+        self.rebuild()
+        self.prefetch_readmes()
+        n = self._added
+        if not self._quiet:
+            self.toast(f"Added {n} new repo{'s' if n != 1 else ''}" if n else "Already up to date")
 
-    def _import(self, repos):
+    def _import(self, repos, group_name=INBOX, pinned=False):
+        """Add new repos under a top-level group; returns how many were added."""
         if self.settings.get("public_only"):
             repos = [r for r in repos if not r["isPrivate"]]
         known = {d["url"]: d for d, *_ in walk(self.tree) if d["type"] == "project"}
-        inbox = next((d for d in self.tree if d["type"] == "group" and d["name"] == INBOX), None)
+        grp = next((d for d in self.tree
+                    if d["type"] == "group" and d["name"].lower() == group_name.lower()), None)
+        if grp and pinned:
+            grp["pinned"] = True
         added = 0
         for r in repos:
+            lang = (r.get("primaryLanguage") or {}).get("name", "")
+            updated = (r.get("updatedAt") or "")[:10]
             if r["url"] in known:
                 known[r["url"]].update(description=r["description"] or "", private=r["isPrivate"],
-                                       language=(r.get("primaryLanguage") or {}).get("name", ""),
-                                       updated=(r.get("updatedAt") or "")[:10])
+                                       language=lang, updated=updated)
                 continue
             if r["isArchived"]:
                 continue
-            if inbox is None:
-                inbox = new_group(INBOX)
-                self.tree.append(inbox)
+            if grp is None:
+                grp = new_group(group_name)
+                if pinned:
+                    grp["pinned"] = True
+                self.tree.append(grp)
             guess = os.path.join(self.settings["projects_dir"], r["name"])
-            inbox["children"].append(new_project(
+            grp["children"].append(new_project(
                 r["name"], url=r["url"], description=r["description"] or "",
                 private=r["isPrivate"], path=guess if os.path.isdir(guess) else "",
-                language=(r.get("primaryLanguage") or {}).get("name", ""),
-                updated=(r.get("updatedAt") or "")[:10]))
+                language=lang, updated=updated))
             added += 1
-        self.rebuild()
-        self.prefetch_readmes()
-        self.toast(f"Added {added} new repo{'s' if added != 1 else ''}" if added else "Already up to date")
+        return added
 
     def clone(self, d, button, then=None):
         if not d["path"]:
@@ -1122,13 +1162,15 @@ class Grove(Adw.ApplicationWindow):
                            ("projects_dir", "Projects folder")]:
             rows[key] = Adw.EntryRow(title=title, text=s[key])
             lst.append(rows[key])
-        user_row = Adw.EntryRow(title="GitHub username to sync (optional, works without gh)",
-                                text=s.get("github_user", ""))
+        user_row = Adw.EntryRow(title="Follow other GitHub users (comma separated)",
+                                text=", ".join(s.get("extra_users", [])))
         pub_row = Adw.SwitchRow(title="Public repos only", active=s.get("public_only", False),
                                 subtitle="Never import private repositories")
         lst.append(user_row)
         lst.append(pub_row)
-        dlg = Adw.AlertDialog(heading="Settings", extra_child=lst)
+        dlg = Adw.AlertDialog(heading="Settings", extra_child=lst,
+                              body=f"{FEATURED}'s public repos are always shown first. "
+                                   "Add other GitHub users to follow their public repos too.")
         dlg.add_response("cancel", "Cancel")
         dlg.add_response("save", "Save")
         dlg.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
@@ -1138,9 +1180,11 @@ class Grove(Adw.ApplicationWindow):
                 for k, row in rows.items():
                     if row.get_text().strip():
                         s[k] = row.get_text().strip()
-                s["github_user"] = user_row.get_text().strip()
+                names = [n.strip().lstrip("@") for n in re.split(r"[,\s]+", user_row.get_text())]
+                s["extra_users"] = list(dict.fromkeys(n for n in names if USERNAME.fullmatch(n)))
                 s["public_only"] = pub_row.get_active()
                 self.save()
+                self.sync()
         dlg.connect("response", resp)
         dlg.present(self)
 
