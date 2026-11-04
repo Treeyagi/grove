@@ -6,10 +6,14 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 import uuid
+import zipfile
 
 import gi
 
@@ -114,6 +118,7 @@ def default_settings():
         "hackers": True,
         "extra_users": [],     # other GitHub accounts whose public repos to follow
         "public_only": False,  # never import private repos
+        "prefer_releases": True,  # Install and Run download a repo's latest release when it has one
     }
 
 
@@ -138,8 +143,8 @@ def walk(items, parent=None):
             yield from walk(d["children"], d)
 
 
-def detect_commands(path):
-    """Guess (install, run) shell commands from the files in a project."""
+def _detect_by_files(path):
+    """Guess (install, run) shell commands from the build files in a project."""
     def has(*names):
         return any(os.path.exists(os.path.join(path, n)) for n in names)
 
@@ -174,6 +179,197 @@ def detect_commands(path):
     if has("Makefile"):
         return "make", "make run" if makefile_target("run") else ""
     return "", ""
+
+
+
+# ---- releases -------------------------------------------------------------------------------
+# Worst first: things that are not for a Linux PC, and files that are not the program.
+NOT_FOR_US = re.compile(r"(?i)(mac|darwin|osx|\.exe|\.msi|\.dmg|\.deb|\.rpm|\.apk|\.sig|\.asc|\.sha|\.md5|\.txt|\.json"
+                        r"|\.sbom|checksum|arm64|aarch64|armv|i386|i686|riscv|ppc|s390|(?<![a-z])win(dows|32|64)?(?![a-z]))")
+
+
+def asset_score(name):
+    """How good a release file looks for this PC (x86_64 Linux); 0 or less means skip it."""
+    n = name.lower()
+    if NOT_FOR_US.search(n) or n.endswith(".pkg.tar.zst"):
+        return 0
+    score = 1
+    if n.endswith(".appimage"):
+        score += 50
+    elif n.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2")):
+        score += 30
+    elif n.endswith(".zip"):
+        score += 25
+    elif "." in os.path.basename(n):
+        return 0   # some other kind of file
+    if re.search(r"x86[_-]64|amd64|x64", n):
+        score += 10
+    if "linux" in n:
+        score += 10
+    return score
+
+
+def pick_asset(assets):
+    """The best release file for this PC, as {name, url}, or None (then Grove clones the release's source)."""
+    ranked = sorted(((asset_score(a["name"]), a) for a in assets), key=lambda t: -t[0])
+    return ranked[0][1] if ranked and ranked[0][0] > 0 else None
+
+
+def parse_release(text):
+    """Normalise `gh release view --json` or the REST API's JSON into {tag, assets:[{name,url}]}, or None."""
+    try:
+        r = json.loads(text)
+    except ValueError:
+        return None
+    tag = r.get("tagName") or r.get("tag_name")
+    if not tag:
+        return None
+    assets = [{"name": a.get("name", ""), "url": a.get("url") or a.get("browser_download_url", "")}
+              for a in r.get("assets", [])]
+    return {"tag": tag, "assets": assets}
+
+
+def unpack(archive, dest):
+    """Put a downloaded release into dest: AppImages are copied and made runnable, archives are extracted
+    (keeping their executable flags), and a lone top-level folder is lifted up so dest holds the app directly."""
+    os.makedirs(dest, exist_ok=True)
+    real = os.path.realpath(dest)
+    if archive.lower().endswith(".appimage") or not (tarfile.is_tarfile(archive) or zipfile.is_zipfile(archive)):
+        out = os.path.join(dest, os.path.basename(archive))
+        shutil.copy2(archive, out)
+        os.chmod(out, 0o755)
+        return
+    if tarfile.is_tarfile(archive):
+        with tarfile.open(archive) as t:
+            for m in t.getmembers():
+                if not os.path.realpath(os.path.join(dest, m.name)).startswith(real):
+                    raise OSError(f"unsafe path in archive: {m.name}")
+            t.extractall(dest, filter="data") if hasattr(tarfile, "data_filter") else t.extractall(dest)
+    else:
+        with zipfile.ZipFile(archive) as z:
+            for i in z.infolist():
+                target = os.path.realpath(os.path.join(dest, i.filename))
+                if not target.startswith(real):
+                    raise OSError(f"unsafe path in archive: {i.filename}")
+                z.extract(i, dest)
+                mode = i.external_attr >> 16
+                if mode and not i.is_dir():
+                    os.chmod(target, mode & 0o777 | 0o200)
+    entries = [e for e in os.listdir(dest) if not e.startswith(".")]
+    if len(entries) == 1 and os.path.isdir(os.path.join(dest, entries[0])):
+        inner = os.path.join(dest, entries[0])
+        for e in os.listdir(inner):
+            shutil.move(os.path.join(inner, e), os.path.join(dest, e))
+        os.rmdir(inner)
+
+
+def _is_exec(path):
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def release_run(path):
+    """The run command for a downloaded release: an AppImage, a launcher script, the one program in the folder,
+    or the Exec line of a .desktop file. Empty if nothing obvious is there."""
+    try:
+        names = sorted(os.listdir(path))
+    except OSError:
+        return ""
+    for n in names:
+        if n.lower().endswith(".appimage") and os.path.isfile(os.path.join(path, n)):
+            return "./" + shlex.quote(n)
+    base = os.path.basename(os.path.normpath(path)).lower()
+    for n in ("run.sh", "start.sh", "launch.sh", base + ".sh"):
+        if n in names and _is_exec(os.path.join(path, n)):
+            return "./" + n
+    for n in names:
+        if n.endswith(".desktop"):
+            try:
+                with open(os.path.join(path, n), errors="replace") as f:
+                    for line in f:
+                        if line.startswith("Exec="):
+                            cmd = re.sub(r"\s%[a-zA-Z]", "", line[5:].strip()).strip()
+                            first = shlex.split(cmd)[0] if cmd else ""
+                            if first and (os.path.isabs(first) or shutil.which(first)
+                                          or os.path.exists(os.path.join(path, first))):
+                                return cmd
+            except (OSError, ValueError):
+                pass
+    skip = re.compile(r"(?i)(install|uninstall|setup|configure|update|\.so|\.sh$|\.py$|\.txt$|\.md$|license)")
+    progs = [n for n in names if _is_exec(os.path.join(path, n)) and not skip.search(n)]
+    if len(progs) > 1:
+        progs = [n for n in progs if n.lower().startswith(base)] or progs[:0]
+    if len(progs) == 1:
+        return "./" + shlex.quote(progs[0])
+    return ""
+
+
+_RUNNERS = ("python3", "python", "./", "npm ", "npx ", "pnpm ", "yarn ", "cargo ", "go ", "node ", "bun ", "deno ",
+            "make", "java ", "flatpak run", "uv run", "poetry run", "ruby ", "bash ", "sh ", ".venv/")
+_UNSAFE = re.compile(r"(?i)(sudo|curl|wget|\|\s*(ba)?sh|\brm\b|pacman|\bapt\b|dnf|yay|paru|pip3? install|git clone|\bcd\b|&&|;)")
+
+
+def _first_command(block, path):
+    """The first line of a code block that looks like a safe program start whose files exist."""
+    for line in block:
+        cmd = re.sub(r"\s+#.*$", "", line.strip().lstrip("$").strip())
+        if not cmd or cmd.startswith("#") or _UNSAFE.search(cmd):
+            continue
+        if not cmd.startswith(_RUNNERS):
+            continue
+        try:
+            parts = shlex.split(cmd)
+        except ValueError:
+            continue
+        files = [t for t in parts[1:] if t.endswith((".py", ".sh", ".js", ".jar"))] + ([parts[0]] if parts[0].startswith("./") else [])
+        if all(os.path.exists(os.path.join(path, t)) for t in files):
+            return cmd
+    return ""
+
+
+def readme_commands(path):
+    """(install, run) from the README: the first safe command in a code block under a heading about installing
+    or running, checked against the files that are really there. How the author says to start it."""
+    text = ""
+    for n in ("README.md", "README", "readme.md", "README.rst", "README.txt"):
+        try:
+            with open(os.path.join(path, n), errors="replace") as f:
+                text = f.read(200_000)
+            break
+        except OSError:
+            pass
+    install = run = ""
+    heading, block, inside = "", [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            if inside:
+                cmd = _first_command(block, path)
+                if cmd:
+                    if re.search(r"(?i)\b(install|setup|set up|build|requirements|dependencies)", heading):
+                        install = install or cmd
+                    elif re.search(r"(?i)\b(run|running|launch|start|usage|use|quick ?start|getting started)\b", heading):
+                        run = run or cmd
+            block, inside = [], not inside
+        elif inside:
+            block.append(line)
+        elif line.startswith("#"):
+            heading = line.lstrip("#").strip()
+    return install, run
+
+
+def detect_commands(path):
+    """Guess (install, run) shell commands for a project: its build files first, then what a downloaded release
+    contains (AppImage, launcher, program), then what the README says, then a script named like the project."""
+    install, run = _detect_by_files(path)
+    if not run:
+        run = release_run(path)
+    if not (install and run):
+        r_install, r_run = readme_commands(path)
+        install, run = install or r_install, run or r_run
+    if not run:
+        name = os.path.basename(os.path.normpath(path)).lower()
+        if os.path.isfile(os.path.join(path, name + ".py")):
+            run = f"python3 {shlex.quote(name + '.py')}"
+    return install, run
 
 
 def spawn(argv, cwd=None):
@@ -312,6 +508,8 @@ class Grove(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title="Grove", default_width=1000, default_height=680)
         self.load()
+        self.update_checked = set()   # projects already asked about a newer release this session
+        self.latest_tags = {}         # project id -> the newer release found
         self.sel = None
         self.expanded = set(self.data.get("expanded", []))
         self.query = ""
@@ -717,6 +915,15 @@ class Grove(Adw.ApplicationWindow):
             b.connect("clicked", fn)
             bar.append(b)
         launch.add(bar)
+        newer = self.latest_tags.get(d["id"])
+        if newer and d.get("release") and newer["tag"] != d["release"]["tag"]:
+            up = Gtk.Button(child=Adw.ButtonContent(icon_name="software-update-available-symbolic",
+                                                    label=f"Update to {newer['tag']} (you have {d['release']['tag']})"),
+                            css_classes=["suggested-action"], margin_top=8)
+            up.connect("clicked", lambda b: self.update_release(d, b))
+            launch.add(up)
+        elif d.get("release") and self.cloned(d):
+            GLib.idle_add(self.check_update, d)
         page.add(launch)
 
         # advanced, tucked away
@@ -1293,21 +1500,98 @@ class Grove(Adw.ApplicationWindow):
             added += 1
         return added
 
-    def clone(self, d, button, then=None):
-        if not d["path"]:
-            d["path"] = os.path.join(self.settings["projects_dir"], d["name"])
-        path = os.path.expanduser(d["path"])
+    def _busy(self, button, label, toast_text):
         if button:
             button.set_sensitive(False)
             child = button.get_child()
-            (child.set_label if isinstance(child, Adw.ButtonContent) else button.set_label)("Cloning…")
+            (child.set_label if isinstance(child, Adw.ButtonContent) else button.set_label)(label)
         else:
-            self.toast(f"Cloning {d['name']}…")
-        tool = ["gh", "repo", "clone"] if shutil.which("gh") else ["git", "clone"]
+            self.toast(toast_text)
+
+    def clone(self, d, button, then=None):
+        """Get a project onto this computer: its latest release when it has one (a ready-to-run download, or
+        the release's source at its tag), otherwise a plain git clone. Run then() when it is there."""
+        if not d["path"]:
+            d["path"] = os.path.join(self.settings["projects_dir"], d["name"])
+        slug = repo_slug(d["url"])
+        if slug and self.settings.get("prefer_releases", True):
+            self._busy(button, "Looking for a release…", f"Looking for a release of {d['name']}…")
+            self.latest_release(slug, lambda rel: self._acquire(d, button, rel, then))
+        else:
+            self._git_clone(d, button, None, then)
+
+    def latest_release(self, slug, cb):
+        """cb(release or None): the repo's latest release as {tag, assets}, using gh if there is one."""
+        if shutil.which("gh"):
+            argv = ["gh", "release", "view", "--repo", slug, "--json", "tagName,assets"]
+        else:
+            argv = ["curl", "-fsSL", "-H", "Accept: application/vnd.github+json",
+                    f"https://api.github.com/repos/{slug}/releases/latest"]
+        self.run_async(argv, lambda proc, out, _e: cb(parse_release(out) if proc.get_exit_status() == 0 else None))
+
+    def _acquire(self, d, button, rel, then):
+        if not rel:
+            self._git_clone(d, button, None, then)
+            return
+        asset = pick_asset(rel["assets"])
+        if not asset:   # a release with no program to download: its source, at the release's tag
+            self._git_clone(d, button, rel["tag"], then)
+            return
+        self._busy(button, f"Downloading {rel['tag']}…", f"Downloading {d['name']} {rel['tag']}…")
+        self._download_release(d, rel, asset, lambda ok: self._acquired(d, button, ok, then))
+
+    def _download_release(self, d, rel, asset, cb):
+        """Download the asset and unpack it into the project's folder. cb(True/False)."""
+        slug = repo_slug(d["url"])
+        tmp = tempfile.mkdtemp(prefix="grove-")
+        out = os.path.join(tmp, asset["name"])
+        if shutil.which("gh"):
+            argv = ["gh", "release", "download", rel["tag"], "--repo", slug, "--pattern", asset["name"],
+                    "--dir", tmp, "--clobber"]
+        else:
+            argv = ["curl", "-fL", "-o", out, asset["url"]]
+
+        def done(proc, _o, err):
+            ok = proc.get_exit_status() == 0 and os.path.exists(out)
+            try:
+                if ok:
+                    path = os.path.expanduser(d["path"])
+                    if os.path.isdir(path) and os.listdir(path):   # an update: keep the old one beside it
+                        shutil.move(path, f"{path}.old-{int(time.time())}")
+                    unpack(out, path)
+                    d["release"] = {"tag": rel["tag"], "kind": "download", "asset": asset["name"]}
+                    d["run"] = d["install"] = ""   # work out how to run this one afresh
+                else:
+                    lines = (err or "").strip().splitlines()
+                    self.toast(lines[-1] if lines else "Download failed")
+            except (OSError, shutil.Error) as e:
+                ok = False
+                self.toast(f"Couldn't unpack it: {e}")
+            shutil.rmtree(tmp, ignore_errors=True)
+            cb(ok)
+        self.run_async(argv, done)
+
+    def _acquired(self, d, button, ok, then):
+        if ok:
+            self.toast(f"Downloaded {d['name']} {d['release']['tag']}")
+            self.fill_missing(d)
+        self.rebuild(d["id"])
+        if ok and then:
+            then()
+
+    def _git_clone(self, d, button, tag, then):
+        path = os.path.expanduser(d["path"])
+        self._busy(button, "Cloning…", f"Cloning {d['name']}…")
+        if shutil.which("gh"):
+            argv = ["gh", "repo", "clone", d["url"], path] + (["--", "--branch", tag] if tag else [])
+        else:
+            argv = ["git", "clone"] + (["--branch", tag] if tag else []) + [d["url"], path]
 
         def done(proc, _out, err):
             if proc.get_exit_status() == 0:
-                self.toast(f"Cloned {d['name']}")
+                if tag:
+                    d["release"] = {"tag": tag, "kind": "source"}
+                self.toast(f"Cloned {d['name']}" + (f" at {tag}" if tag else ""))
                 self.fill_missing(d)
             else:
                 lines = (err or "").strip().splitlines()
@@ -1315,7 +1599,55 @@ class Grove(Adw.ApplicationWindow):
             self.rebuild(d["id"])
             if then and proc.get_exit_status() == 0:
                 then()
-        self.run_async(tool + [d["url"], path], done)
+        self.run_async(argv, done)
+
+    # ---- updates ---------------------------------------------------------
+    def check_update(self, d):
+        """Once per session per project: is there a newer release than the one on disk?"""
+        slug = repo_slug(d["url"])
+        if not (slug and d.get("release")) or d["id"] in self.update_checked:
+            return
+        self.update_checked.add(d["id"])
+
+        def got(rel):
+            if rel and rel["tag"] != d["release"]["tag"]:
+                self.latest_tags[d["id"]] = rel
+                self._refresh_if_current(d)
+        self.latest_release(slug, got)
+
+    def update_release(self, d, button=None):
+        rel = self.latest_tags.get(d["id"])
+        if not rel:
+            return
+        path = os.path.expanduser(d["path"])
+        self._busy(button, "Updating…", f"Updating {d['name']}…")
+        if d["release"].get("kind") == "download":
+            asset = pick_asset(rel["assets"])
+            if not asset:
+                self.toast("The new release has no download for this PC")
+                return
+            self._download_release(d, rel, asset, lambda ok: self._updated(d, rel, ok))
+            return
+
+        def checked_out(proc, _o, err):
+            if proc.get_exit_status() == 0:
+                d["release"]["tag"] = rel["tag"]
+                self.latest_tags.pop(d["id"], None)
+                self.toast(f"Updated {d['name']} to {rel['tag']}")
+            else:
+                lines = (err or "").strip().splitlines()
+                self.toast(lines[-1] if lines else "Update failed (uncommitted changes?)")
+            self.save()
+            self.rebuild(d["id"])
+        self.run_async(["git", "-C", path, "fetch", "--tags", "--force", "--quiet"],
+                       lambda p, _o, _e: self.run_async(["git", "-C", path, "checkout", "-q", rel["tag"]], checked_out))
+
+    def _updated(self, d, rel, ok):
+        if ok:
+            self.latest_tags.pop(d["id"], None)
+            self.toast(f"Updated {d['name']} to {rel['tag']} (the old copy is kept beside it)")
+            self.fill_missing(d)
+        self.rebuild(d["id"])
 
     # ---- settings ----------------------------------------------------
     def show_settings(self):
@@ -1331,8 +1663,11 @@ class Grove(Adw.ApplicationWindow):
                                 text=", ".join(s.get("extra_users", [])))
         pub_row = Adw.SwitchRow(title="Public repos only", active=s.get("public_only", False),
                                 subtitle="Never import private repositories")
+        rel_row = Adw.SwitchRow(title="Download releases", active=s.get("prefer_releases", True),
+                                subtitle="Install and Run get a repo's latest release when it has one, otherwise clone it")
         lst.append(user_row)
         lst.append(pub_row)
+        lst.append(rel_row)
         dlg = Adw.AlertDialog(heading="Settings", extra_child=lst,
                               body=f"{FEATURED}'s public repos are always shown first. "
                                    "Add other GitHub users to follow their public repos too.")
@@ -1348,6 +1683,7 @@ class Grove(Adw.ApplicationWindow):
                 names = [n.strip().lstrip("@") for n in re.split(r"[,\s]+", user_row.get_text())]
                 s["extra_users"] = list(dict.fromkeys(n for n in names if USERNAME.fullmatch(n)))
                 s["public_only"] = pub_row.get_active()
+                s["prefer_releases"] = rel_row.get_active()
                 self.save()
                 self.sync()
         dlg.connect("response", resp)

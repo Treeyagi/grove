@@ -34,8 +34,20 @@ Options go after `sh -s --`, for example `... | sh -s -- --no-launch` or `... | 
 - Each project has **Editor, Terminal, Install, Run, Files** and **GitHub** buttons. Install and Run
   commands are detected from the repo (npm, cargo, go, Python, make, `install.sh`) and can be edited.
 - Projects deployed to GitHub Pages get a **Live** button, and **Run** opens the live site (no clone needed).
-- **Install** and **Run** download the repo first if it isn't on your computer yet. Run on a new repo does the
-  whole chain in one terminal: clone, install, then run.
+- **Install** and **Run** download the project first if it isn't on your computer yet. Run on a new repo does the
+  whole chain in one terminal: get it, install, then run.
+- **Releases first.** If the repo has a GitHub release, Grove downloads that instead of the main branch: an
+  AppImage, or a Linux x86_64 `.tar.gz`/`.zip` (it skips Windows, Mac, ARM, `.deb` and checksum files),
+  unpacked into your projects folder with its executable flags kept. A release with no download gets its source
+  cloned at the release's tag. Repos with no release are cloned as before. Turn it off in ☰ → Settings →
+  *Download releases*.
+- **It works out how to run it.** From the files (npm, cargo, go, Python, make, `install.sh`), from what a release
+  contains (an AppImage, `run.sh`/`start.sh`, a `.desktop` file's `Exec=`, or the one program in the folder), and
+  otherwise from the README: the first safe command in a code block under an install or run heading, checked
+  against the files that are really there (never `sudo`, `curl | sh` or the like). You can still edit both commands.
+- **Updates.** A project Grove downloaded from a release shows an **Update to vX** button when a newer release
+  exists. An update puts the new one in the same folder and keeps the old one beside it (`name.old-<time>`);
+  source releases switch to the new tag.
 - **Remove** a repo with the trash button under the tree, the Delete key, or the button on its page. Grove asks first,
   and for a clone it can also delete the local copy (only a git checkout of that exact repo, with a warning if it
   has uncommitted changes). Removed repos stay gone after a sync; ☰ → *Bring back removed repos* undoes it.
