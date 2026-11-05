@@ -371,6 +371,25 @@ def _own_install(path, run):
     return f"{run} --install" if b"--install" in head else ""
 
 
+def _deps_step(path, run):
+    """A command that installs what the project needs before it is installed or run: the program's own
+    `--deps` option, or an install-deps.sh in the folder. Adds --yes when the script says it understands it."""
+    def head(rel):
+        try:
+            with open(os.path.join(path, rel), "rb") as f:
+                return f.read(8192)
+        except OSError:
+            return b""
+    if run.startswith("./") and " " not in run:
+        h = head(shlex.split(run)[0])
+        if b"--deps" in h:
+            return f"{run} --deps" + (" --yes" if b"--yes" in h else "")
+    for rel in ("install-deps.sh", "tools/install-deps.sh", "scripts/install-deps.sh"):
+        if os.path.isfile(os.path.join(path, rel)):
+            return f"sh {shlex.quote(rel)}" + (" --yes" if b"--yes" in head(rel) else "")
+    return ""
+
+
 def menu_entry(path, name, run):
     """Write an app-menu entry for a downloaded program (run like './app'); returns its path or raises OSError."""
     parts = shlex.split(run)
@@ -405,6 +424,9 @@ def detect_commands(path):
         install, run = install or r_install, run or r_run
     if run.startswith("./") and not install and " " not in run:
         install = _own_install(path, run)
+    deps = _deps_step(path, run)
+    if deps:   # needed software first, then the install step, then (Grove adds) the run
+        install = f"{deps} && {install}" if install else deps
     if not run:
         name = os.path.basename(os.path.normpath(path)).lower()
         if os.path.isfile(os.path.join(path, name + ".py")):

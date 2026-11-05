@@ -113,5 +113,23 @@ entry = g.menu_entry(d, "Plain App", "./plain")
 text = open(entry).read()
 check("menu entry points at the program", f'Exec="{os.path.join(d, "plain")}"' in text and "Name=Plain App" in text, True)
 
+# a program with --deps and --install: dependencies first, then its install
+d = os.path.join(tmp, "withdeps")
+os.makedirs(d)
+open(os.path.join(d, "buddy"), "w").write("#!/bin/sh\n# buddy [--deps [--yes] | --install | --stop]\n")
+os.chmod(os.path.join(d, "buddy"), 0o755)
+check("--deps then --install", g.detect_commands(d), ("./buddy --deps --yes && ./buddy --install", "./buddy"))
+
+# a project with its own install-deps.sh (source clone): deps first, then the README's install
+d = os.path.join(tmp, "src")
+os.makedirs(os.path.join(d, "tools"))
+os.makedirs(os.path.join(d, "overlay"))
+open(os.path.join(d, "tools", "install-deps.sh"), "w").write("# --yes\n")
+open(os.path.join(d, "tools", "install.py"), "w").write("")
+open(os.path.join(d, "overlay", "main.py"), "w").write("")
+open(os.path.join(d, "README.md"), "w").write("## Install\n```bash\npython3 tools/install.py\n```\n## Run\n```bash\npython3 overlay/main.py\n```\n")
+check("source clone: deps, install, run", g.detect_commands(d),
+      ("sh tools/install-deps.sh --yes && python3 tools/install.py", "python3 overlay/main.py"))
+
 print("\nALL OK" if not failed else f"\nFAILED: {failed}")
 sys.exit(1 if failed else 0)
