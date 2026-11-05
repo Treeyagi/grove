@@ -224,7 +224,7 @@ def parse_release(text):
     tag = r.get("tagName") or r.get("tag_name")
     if not tag:
         return None
-    assets = [{"name": a.get("name", ""), "url": a.get("url") or a.get("browser_download_url", "")}
+    assets = [{"name": a.get("name", ""), "url": a.get("browser_download_url") or a.get("url", "")}   # the REST API's "url" is metadata, not the file
               for a in r.get("assets", [])]
     return {"tag": tag, "assets": assets}
 

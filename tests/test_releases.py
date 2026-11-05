@@ -37,6 +37,8 @@ check("then the Linux tarball", pick(names[1:]), names[1])
 check("nothing usable", pick(names[2:]), None)
 check("rest json", g.parse_release('{"tag_name":"v2","assets":[{"name":"b","browser_download_url":"x"}]}'),
       {"tag": "v2", "assets": [{"name": "b", "url": "x"}]})
+check("rest json: download link, not the API url",
+      g.parse_release('{"tag_name":"v2","assets":[{"name":"b","url":"api","browser_download_url":"dl"}]}')["assets"][0]["url"], "dl")
 check("not json", g.parse_release("nope"), None)
 
 # a folder with a file of the same name inside it (app/app) lifts up cleanly
