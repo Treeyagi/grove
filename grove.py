@@ -1388,6 +1388,14 @@ class Grove(Adw.ApplicationWindow):
             if not d.get("run"):
                 self.open_site(d)
                 return
+        if self.cloned(d):
+            self.fill_missing(d)
+            nothing = not (d.get("run") or d.get("install")
+                           or os.path.exists(os.path.join(os.path.expanduser(d["path"]), "index.html")))
+            if nothing and d["url"]:
+                self.toast("Nothing runnable in that folder: downloading it again")
+                self.clone(d, button, then=lambda: self._launch(d, with_install=True))
+                return
         if not self.cloned(d):
             if not d["url"]:
                 self.toast("Set a repository URL or folder first")
@@ -1411,7 +1419,9 @@ class Grove(Adw.ApplicationWindow):
             self.open_terminal(d, " && ".join(steps))
 
     def cloned(self, d):
-        return bool(d["path"]) and os.path.isdir(os.path.expanduser(d["path"]))
+        """Is the project on this computer? An empty folder (left by a failed attempt) doesn't count."""
+        path = os.path.expanduser(d["path"]) if d["path"] else ""
+        return os.path.isdir(path) and any(e != ".git" for e in os.listdir(path))
 
     def open_terminal(self, d, cmd=None):
         path = self.project_dir(d)
@@ -1587,12 +1597,26 @@ class Grove(Adw.ApplicationWindow):
         the release's source at its tag), otherwise a plain git clone. Run then() when it is there."""
         if not d["path"]:
             d["path"] = os.path.join(self.settings["projects_dir"], d["name"])
+        self._clear_way(d)
         slug = repo_slug(d["url"])
         if slug and self.settings.get("prefer_releases", True):
             self._busy(button, "Looking for a release…", f"Looking for a release of {d['name']}…")
             self.latest_release(slug, lambda rel: self._acquire(d, button, rel, then))
         else:
             self._git_clone(d, button, None, then)
+
+    def _clear_way(self, d):
+        """An empty folder is removed; one with something in it is renamed to name.old-<time> (never deleted)."""
+        path = os.path.expanduser(d["path"])
+        if not os.path.isdir(path):
+            return
+        try:
+            if os.listdir(path):
+                shutil.move(path, f"{path}.old-{int(time.time())}")
+            else:
+                os.rmdir(path)
+        except OSError as e:
+            self.toast(f"Couldn't make room in {path}: {e}")
 
     def latest_release(self, slug, cb):
         """cb(release or None): the repo's latest release as {tag, assets}, using gh if there is one."""
