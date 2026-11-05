@@ -95,5 +95,23 @@ open(os.path.join(proj, "README.md"), "w").write(
     "python3 missing.py\n```\n")
 check("README: run found, sudo and missing files refused", g.detect_commands(proj), ("", "python3 overlay/main.py"))
 
+# a program with its own --install gets it as the install step
+d = os.path.join(tmp, "selfinst")
+os.makedirs(d)
+open(os.path.join(d, "buddy"), "w").write("#!/bin/sh\n# usage: buddy [--stop | --install | --uninstall]\n")
+os.chmod(os.path.join(d, "buddy"), 0o755)
+check("--install is picked up", g.detect_commands(d), ("./buddy --install", "./buddy"))
+
+# one without gets an app-menu entry instead
+d = os.path.join(tmp, "plain")
+os.makedirs(d)
+open(os.path.join(d, "plain"), "w").write("#!/bin/sh\n")
+os.chmod(os.path.join(d, "plain"), 0o755)
+check("plain program: no installer", g.detect_commands(d), ("", "./plain"))
+os.environ["XDG_DATA_HOME"] = os.path.join(tmp, "xdg")
+entry = g.menu_entry(d, "Plain App", "./plain")
+text = open(entry).read()
+check("menu entry points at the program", f'Exec="{os.path.join(d, "plain")}"' in text and "Name=Plain App" in text, True)
+
 print("\nALL OK" if not failed else f"\nFAILED: {failed}")
 sys.exit(1 if failed else 0)

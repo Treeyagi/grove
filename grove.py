@@ -360,6 +360,38 @@ def readme_commands(path):
     return install, run
 
 
+def _own_install(path, run):
+    """'./app --install' when the program says it has an --install option in its first few KB (a shell stub
+    or script does; a big binary won't). Empty otherwise."""
+    try:
+        with open(os.path.join(path, shlex.split(run)[0]), "rb") as f:
+            head = f.read(4096)
+    except (OSError, ValueError, IndexError):
+        return ""
+    return f"{run} --install" if b"--install" in head else ""
+
+
+def menu_entry(path, name, run):
+    """Write an app-menu entry for a downloaded program (run like './app'); returns its path or raises OSError."""
+    parts = shlex.split(run)
+    exe = os.path.abspath(os.path.join(path, parts[0]))
+    if len(parts) != 1 or not os.access(exe, os.X_OK):
+        raise OSError("this project's run command isn't a single program")
+    icon = next((os.path.join(path, f) for f in sorted(os.listdir(path))
+                 if re.match(r"(?i)(icon|logo|[a-z0-9_-]*)\.(png|svg)$", f)), "")
+    apps = os.path.join(GLib.get_user_data_dir(), "applications")
+    os.makedirs(apps, exist_ok=True)
+    out = os.path.join(apps, "grove-" + re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") + ".desktop")
+    quoted = '"' + exe.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    lines = ["[Desktop Entry]", "Type=Application", f"Name={name}", f"Comment={name} (added by Grove)",
+             f"Exec={quoted}", f"Path={path}", "Terminal=false", "Categories=Utility;"]
+    if icon:
+        lines.append(f"Icon={icon}")
+    with open(out, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    return out
+
+
 def detect_commands(path):
     """Guess (install, run) shell commands for a project: its build files first, then what a downloaded release
     contains (AppImage, launcher, program), then what the README says, then a script named like the project."""
@@ -371,6 +403,8 @@ def detect_commands(path):
     if not (install and run):
         r_install, r_run = readme_commands(path)
         install, run = install or r_install, run or r_run
+    if run.startswith("./") and not install and " " not in run:
+        install = _own_install(path, run)
     if not run:
         name = os.path.basename(os.path.normpath(path)).lower()
         if os.path.isfile(os.path.join(path, name + ".py")):
@@ -1309,6 +1343,14 @@ class Grove(Adw.ApplicationWindow):
             return
         self.fill_missing(d)
         if not d.get("install"):
+            run = (d.get("run") or "").strip()
+            if d.get("release", {}).get("kind") == "download" and run.startswith("./"):
+                try:   # a downloaded program with no installer: put it in the app menu
+                    menu_entry(os.path.expanduser(d["path"]), d["name"], run)
+                    self.toast(f"Added {d['name']} to your app menu")
+                except OSError as e:
+                    self.toast(f"Couldn't add it to the app menu: {e}")
+                return
             self.toast("No install step detected: it's ready to run, or set one by hand")
             return
         self.open_terminal(d, d["install"])
