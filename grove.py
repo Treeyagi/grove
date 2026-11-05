@@ -1419,9 +1419,11 @@ class Grove(Adw.ApplicationWindow):
             return
         term = shlex.split(self.settings["terminal"])
         flags = TERMINAL_FLAGS.get(os.path.basename(term[0]), ["-e"])
-        # show what is being run and how it ended, so a silent failure isn't a mystery
+        # show what is being run and how it ended, and keep it on screen (a shell greeting like fastfetch would bury it)
         shell = (f'printf "%s\\n" {shlex.quote("$ " + cmd)}; {cmd}; rc=$?; echo; '
-                 f'echo "[Grove: finished with exit code $rc]"; exec "${{SHELL:-sh}}"') if cmd else 'exec "${SHELL:-sh}"'
+                 f'echo "[Grove: finished with exit code $rc]"; '
+                 f'printf "Press Enter to close this window (or type s for a shell): "; read a; '
+                 f'case "$a" in s|S) exec "${{SHELL:-sh}}";; esac') if cmd else 'exec "${SHELL:-sh}"'
         argv = term + [f.replace("{path}", path) for f in flags] + ["sh", "-c", shell]
         self.report(spawn(argv, path))
 
