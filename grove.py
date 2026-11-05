@@ -185,7 +185,7 @@ def _detect_by_files(path):
 # ---- releases -------------------------------------------------------------------------------
 # Worst first: things that are not for a Linux PC, and files that are not the program.
 NOT_FOR_US = re.compile(r"(?i)(mac|darwin|osx|\.exe|\.msi|\.dmg|\.deb|\.rpm|\.apk|\.sig|\.asc|\.sha|\.md5|\.txt|\.json"
-                        r"|\.sbom|checksum|arm64|aarch64|armv|i386|i686|riscv|ppc|s390|(?<![a-z])win(dows|32|64)?(?![a-z]))")
+                        r"|\.sbom|checksum|sums|sha\d+|arm64|aarch64|armv|i386|i686|riscv|ppc|s390|(?<![a-z])win(dows|32|64)?(?![a-z]))")
 
 
 def asset_score(name):
@@ -200,8 +200,8 @@ def asset_score(name):
         score += 30
     elif n.endswith(".zip"):
         score += 25
-    elif "." in os.path.basename(n):
-        return 0   # some other kind of file
+    elif "." in os.path.basename(n) or not re.search(r"linux|x86[_-]64|amd64", n):
+        return 0   # some other kind of file (a bare name only counts if it says it's for Linux)
     if re.search(r"x86[_-]64|amd64|x64", n):
         score += 10
     if "linux" in n:
@@ -258,9 +258,11 @@ def unpack(archive, dest):
     entries = [e for e in os.listdir(dest) if not e.startswith(".")]
     if len(entries) == 1 and os.path.isdir(os.path.join(dest, entries[0])):
         inner = os.path.join(dest, entries[0])
-        for e in os.listdir(inner):
-            shutil.move(os.path.join(inner, e), os.path.join(dest, e))
-        os.rmdir(inner)
+        aside = os.path.join(dest, f".grove-lift-{os.getpid()}")   # the folder may hold something with its own name
+        os.rename(inner, aside)
+        for e in os.listdir(aside):
+            shutil.move(os.path.join(aside, e), os.path.join(dest, e))
+        os.rmdir(aside)
 
 
 def _is_exec(path):
@@ -278,28 +280,30 @@ def release_run(path):
         if n.lower().endswith(".appimage") and os.path.isfile(os.path.join(path, n)):
             return "./" + shlex.quote(n)
     base = os.path.basename(os.path.normpath(path)).lower()
-    for n in ("run.sh", "start.sh", "launch.sh", base + ".sh"):
-        if n in names and _is_exec(os.path.join(path, n)):
-            return "./" + n
-    for n in names:
-        if n.endswith(".desktop"):
-            try:
-                with open(os.path.join(path, n), errors="replace") as f:
-                    for line in f:
-                        if line.startswith("Exec="):
-                            cmd = re.sub(r"\s%[a-zA-Z]", "", line[5:].strip()).strip()
-                            first = shlex.split(cmd)[0] if cmd else ""
-                            if first and (os.path.isabs(first) or shutil.which(first)
-                                          or os.path.exists(os.path.join(path, first))):
-                                return cmd
-            except (OSError, ValueError):
-                pass
+    launchers = [n for n in names if re.fullmatch(r"(?i)(run|start|launch)([-_.][a-z0-9_.-]*)?\.sh", n) or n == base + ".sh"]
+    for n in sorted(launchers, key=lambda n: (n.lower() not in ("run.sh", "start.sh", "launch.sh"), n)):
+        if _is_exec(os.path.join(path, n)):
+            return "./" + shlex.quote(n)
     skip = re.compile(r"(?i)(install|uninstall|setup|configure|update|\.so|\.sh$|\.py$|\.txt$|\.md$|license)")
     progs = [n for n in names if _is_exec(os.path.join(path, n)) and not skip.search(n)]
     if len(progs) > 1:
         progs = [n for n in progs if n.lower().startswith(base)] or progs[:0]
     if len(progs) == 1:
         return "./" + shlex.quote(progs[0])
+    for n in names:
+        if n.endswith(".desktop"):
+            try:
+                with open(os.path.join(path, n), errors="replace") as f:
+                    for line in f:
+                        if line.startswith("Exec=") and "%k" not in line and "sh -c" not in line:
+                            cmd = re.sub(r"\s%[a-zA-Z]", "", line[5:].strip()).strip()
+                            first = shlex.split(cmd)[0] if cmd else ""
+                            if first and os.path.isabs(first):
+                                return cmd
+                            if first and os.path.exists(os.path.join(path, first)):
+                                return "./" + cmd   # a program in this folder, not one from $PATH
+            except (OSError, ValueError):
+                pass
     return ""
 
 
@@ -362,6 +366,8 @@ def detect_commands(path):
     install, run = _detect_by_files(path)
     if not run:
         run = release_run(path)
+        if run and install != "./install.sh":
+            install = ""   # a ready-to-run program doesn't need building
     if not (install and run):
         r_install, r_run = readme_commands(path)
         install, run = install or r_install, run or r_run
