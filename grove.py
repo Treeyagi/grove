@@ -29,11 +29,11 @@ INBOX = "Unsorted"
 FEATURED = "Treeyagi"  # always synced and pinned first, for everyone
 SELF_URL = "https://raw.githubusercontent.com/Treeyagi/grove/main/grove.py"
 INSTALLED = os.path.join(GLib.get_user_data_dir(), "grove", "grove.py")   # where install.sh puts it
-# the optional moving background: two looping videos (tall and wide) fetched the first time it is switched on
+# the optional moving background: one wide looping video, fetched the first time it is switched on
 BG_BASE = "https://github.com/Treeyagi/grove/releases/download/backgrounds-v1/"
 BG_DIR = os.path.join(GLib.get_user_data_dir(), "grove", "backgrounds")
 # MPEG-TS first (it plays with the common GStreamer "bad" plugins), MP4 as the fallback ("good" plugins)
-BG_FILES = {"portrait": ("farm-portrait.ts", "farm-portrait.mp4"), "wide": ("farm-wide.ts", "farm-wide.mp4")}
+BG_FILES = {"wide": ("farm-wide.ts", "farm-wide.mp4")}
 USERNAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 
 # argv inserted between the terminal executable and the command to run
@@ -694,7 +694,7 @@ def project_icon(d):
 
 class Grove(Adw.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title="Grove", default_width=560, default_height=800)
+        super().__init__(application=app, title="Grove", default_width=980, default_height=660)
         self.load()
         self.update_checked = set()   # projects already asked about a newer release this session
         self.latest_tags = {}         # project id -> the newer release found
@@ -713,7 +713,7 @@ class Grove(Adw.ApplicationWindow):
         layers.add_overlay(self.toasts)
         layers.set_measure_overlay(self.toasts, True)
         self.set_content(layers)
-        self._bg_kind, self._bg_want, self._bg_since = "", "", 0.0
+        self._bg_kind = ""
         self._media, self._bg_fetching, self._bg_old = {}, set(), None
         self._bg_frames, self._bg_checked, self._bg_slow_count, self._bg_hooked = 0, time.monotonic(), 0, False
         self._bg_fmt = int(self.settings.get("background_fmt", 0))   # which file type this computer can play
@@ -765,7 +765,6 @@ class Grove(Adw.ApplicationWindow):
             "farm", None, GLib.Variant.new_boolean(self.settings.get("background") == "farm"))
         self.farm_action.connect("change-state", self._toggle_farm)
         self.add_action(self.farm_action)
-        GLib.timeout_add(500, self._bg_tick)
         GLib.timeout_add_seconds(1, self._bg_watch)
 
         factory = Gtk.SignalListItemFactory()
@@ -852,9 +851,7 @@ class Grove(Adw.ApplicationWindow):
 
     # ---- moving background -------------------------------------------
     def bg_kind(self):
-        """Tall window gets the portrait video, wide window the landscape one."""
-        w, h = self.get_width(), self.get_height()
-        return "wide" if w > h * 1.15 else "portrait"
+        return "wide"   # one video for every window: it is centred and cropped to fit
 
     def bg_path(self, kind):
         return os.path.join(BG_DIR, BG_FILES[kind][self._bg_fmt])
@@ -885,8 +882,8 @@ class Grove(Adw.ApplicationWindow):
             GLib.timeout_add(1500, lambda: setattr(self, "_bg_old", None) or False)
 
     def apply_background(self):
-        """Show the right video, or none. Once loaded, both videos stay loaded and Grove only switches between
-        them: tearing a video down or starting one while the window is resizing (going fullscreen) freezes GTK."""
+        """Show the video, or none. A loaded video is kept for the whole session: freeing its graphics
+        resources while the window is drawing (or resizing, going fullscreen) freezes GTK."""
         on = self.settings.get("background") == "farm"
         kind = self.bg_kind()
         media = self._media_for(kind) if on else None
@@ -908,7 +905,6 @@ class Grove(Adw.ApplicationWindow):
         self._bg_kind = kind
         self.add_css_class("has-bg")
         self.scrim.set_visible(True)
-        GLib.timeout_add(1500, self._preload_other)
 
     def _bg_hook_clock(self):
         """Count the frames the window really draws, so a computer that can't keep up is noticed."""
@@ -935,22 +931,6 @@ class Grove(Adw.ApplicationWindow):
             self.toast("The moving background was slowing Grove down, so it's frozen on one picture. "
                        "(Graphics acceleration looks off on this computer: restarting it after a driver update often fixes that.)")
         return True
-
-    def _preload_other(self):
-        """Get the other window shape's video ready (downloaded and loaded, paused) while nothing is resizing."""
-        if self.settings.get("background") != "farm" or not self._bg_kind:
-            return False
-        other = "wide" if self._bg_kind == "portrait" else "portrait"
-        if other in self._media:
-            return False
-
-        def ready(ok):
-            if ok and self.settings.get("background") == "farm" and self._bg_kind:
-                m = self._media_for(other)
-                if m is not None and self.bg_video.get_paintable() is not m:
-                    m.pause()
-        self.fetch_background(other, ready)
-        return False
 
     def _bg_error(self, media, _pspec):
         """This computer can't play that file type: try the other one, and if both fail, switch the option off."""
@@ -1013,19 +993,6 @@ class Grove(Adw.ApplicationWindow):
                 action.set_state(GLib.Variant.new_boolean(False))
                 self.save()
         self.fetch_background(self.bg_kind(), done)
-
-    def _bg_tick(self):
-        """Switch to the other (already loaded) video once the window has kept its new shape for a moment."""
-        kind = self.bg_kind()
-        if self.settings.get("background") != "farm" or not self._bg_kind or kind == self._bg_kind:
-            self._bg_want = ""
-            return True
-        if self._bg_want != kind:
-            self._bg_want, self._bg_since = kind, time.monotonic()
-        elif time.monotonic() - self._bg_since >= 1.2 and kind in self._media:
-            self._bg_want = ""
-            self.apply_background()
-        return True
 
     def _toggle_hackers(self, action, value):
         action.set_state(value)
