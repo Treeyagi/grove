@@ -84,3 +84,7 @@ Grove draws with GTK's plain CPU renderer by default, which keeps it around 90 M
 ## Project icons
 
 Every project gets an icon in the list and on its page. Grove picks, in order: your own `~/.config/grove/icons/<name>.svg` (or `.png`), an `icon`/`logo`/`<name>` image in the project's folder, a built-in funny icon for the repos it knows by name, then a coloured tile with the first letter.
+
+## Look
+
+Grove has a warm look (cream and cocoa with a coral accent, rounded cards, a friendly round font if Nunito or Quicksand is installed) that follows your system's light or dark setting. The hacker-movie theme is still one switch away in the menu.

@@ -129,6 +129,61 @@ searchentry.pill-search { border-radius: 999px; min-height: 36px; }
 """ + "".join(f".grad{i} {{ background-image: linear-gradient(135deg, {a}, {b}); }}\n" for i, (a, b) in enumerate(GRADS))
 
 
+# The warm, playful look: cream and cocoa, one coral accent. Named colours override libadwaita's own, so
+# every stock widget (dialogs, menus, switches, the update button) picks the palette up.
+WARM_LIGHT = """
+@define-color window_bg_color #FFF6EC;      @define-color window_fg_color #3B2A20;
+@define-color view_bg_color #FFFBF6;        @define-color view_fg_color #3B2A20;
+@define-color headerbar_bg_color #FFF6EC;   @define-color headerbar_fg_color #3B2A20;
+@define-color headerbar_border_color #F0DFCC; @define-color headerbar_backdrop_color #FFF6EC;
+@define-color card_bg_color #FFFFFF;        @define-color card_fg_color #3B2A20;
+@define-color popover_bg_color #FFFFFF;     @define-color popover_fg_color #3B2A20;
+@define-color dialog_bg_color #FFF6EC;      @define-color dialog_fg_color #3B2A20;
+@define-color sidebar_bg_color #FFF6EC;     @define-color sidebar_fg_color #3B2A20;
+@define-color accent_bg_color #FF7A59;      @define-color accent_color #D9532F;
+@define-color accent_fg_color #FFFFFF;
+@define-color success_bg_color #3DBE8B;     @define-color success_color #1E8F63;
+@define-color warning_bg_color #FFC857;     @define-color warning_color #B97800;
+@define-color destructive_bg_color #E5484D; @define-color destructive_color #C0292E;
+"""
+WARM_DARK = """
+@define-color window_bg_color #261A14;      @define-color window_fg_color #FBEBDD;
+@define-color view_bg_color #2E211A;        @define-color view_fg_color #FBEBDD;
+@define-color headerbar_bg_color #261A14;   @define-color headerbar_fg_color #FBEBDD;
+@define-color headerbar_border_color #3A2A21; @define-color headerbar_backdrop_color #261A14;
+@define-color card_bg_color #34251C;        @define-color card_fg_color #FBEBDD;
+@define-color popover_bg_color #34251C;     @define-color popover_fg_color #FBEBDD;
+@define-color dialog_bg_color #2E211A;      @define-color dialog_fg_color #FBEBDD;
+@define-color sidebar_bg_color #261A14;     @define-color sidebar_fg_color #FBEBDD;
+@define-color accent_bg_color #FF7A59;      @define-color accent_color #FF9A7D;
+@define-color accent_fg_color #FFFFFF;
+@define-color success_bg_color #3DBE8B;     @define-color success_color #6FDDB0;
+@define-color warning_bg_color #FFC857;     @define-color warning_color #FFD98A;
+@define-color destructive_bg_color #E5484D; @define-color destructive_color #FF8A8E;
+"""
+WARM_CSS = """
+window { font-family: "Nunito", "Quicksand", "Cantarell", sans-serif; }
+headerbar { box-shadow: none; }
+button { transition: all 160ms ease; }
+button.pill { border-radius: 999px; }
+button.get-button { background-image: none; background-color: @accent_bg_color; color: @accent_fg_color;
+  box-shadow: 0 6px 16px alpha(@accent_bg_color, 0.45); }
+button.get-button:hover { background-color: shade(@accent_bg_color, 1.07); box-shadow: 0 9px 22px alpha(@accent_bg_color, 0.6); }
+button.get-button:active { box-shadow: 0 2px 6px alpha(@accent_bg_color, 0.4); }
+list.boxed-list, .boxed-list { border-radius: 20px; box-shadow: 0 2px 12px alpha(#6b3f22, 0.10); }
+.card { border-radius: 20px; box-shadow: 0 2px 12px alpha(#6b3f22, 0.10); }
+row.activatable:hover { background-color: alpha(@accent_bg_color, 0.10); }
+listview.home-list > row { transition: background 160ms ease; }
+listview.home-list > row:hover { background-color: alpha(@accent_bg_color, 0.12); }
+listview.home-list > row:selected { background-color: alpha(@accent_bg_color, 0.22); }
+searchentry.pill-search { background-color: @card_bg_color; box-shadow: 0 1px 6px alpha(#6b3f22, 0.14); }
+.section-title { color: @accent_color; opacity: 1; letter-spacing: 0.6px; }
+.hero-title { color: @window_fg_color; }
+.app-icon.big { box-shadow: 0 10px 26px alpha(#6b3f22, 0.30); }
+toast { border-radius: 999px; }
+"""
+
+
 def detect(candidates, default):
     return next((c for c in candidates if shutil.which(c)), default)
 
@@ -791,12 +846,25 @@ class Grove(Adw.ApplicationWindow):
     def load_css(self):
         if Grove._css_loaded:
             return
-        for css in (APP_CSS, HACKERS_CSS):
+        def load(css):
             provider = Gtk.CssProvider()
             provider.load_from_string(css) if hasattr(provider, "load_from_string") \
                 else provider.load_from_data(css.encode())
             Gtk.StyleContext.add_provider_for_display(
                 self.get_display(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            return provider
+        sm = Adw.StyleManager.get_default()
+        Grove._warm = {"provider": None}
+
+        def warm(*_):
+            old = Grove._warm["provider"]
+            if old is not None:
+                Gtk.StyleContext.remove_provider_for_display(self.get_display(), old)
+            Grove._warm["provider"] = load(WARM_DARK if sm.get_dark() else WARM_LIGHT)
+        warm()
+        sm.connect("notify::dark", warm)   # follow the system's light/dark choice
+        for css in (APP_CSS, WARM_CSS, HACKERS_CSS):   # later wins: warm tweaks sit on top of the base rules
+            load(css)
         Grove._css_loaded = True
 
     def logo(self, size):
@@ -923,6 +991,14 @@ class Grove(Adw.ApplicationWindow):
     def current(self):
         row = self.sel.get_selected_item() if self.sel else None
         return row.get_item() if row else None
+
+    def mascot(self, spec, size=120):
+        """A built-in funny icon as a picture for the friendly screens: spec is "mascot:<repo name>"."""
+        if not spec.startswith("mascot:"):
+            return None
+        name = spec.split(":", 1)[1]
+        tex = self.icon_for({"id": "mascot-" + name, "name": name, "path": ""})
+        return Gtk.Image(paintable=tex, pixel_size=size, halign=Gtk.Align.CENTER) if tex else None
 
     def icon_for(self, d):
         """The project's icon as a texture, or None. Looked up once per project and kept until the next rebuild."""
@@ -1069,8 +1145,8 @@ class Grove(Adw.ApplicationWindow):
             page = Adw.StatusPage(
                 title="ACCESS GRANTED" if hack else "Grove",
                 description="Select a target from the tree, or jack into GitHub to pull your repos."
-                if hack else "Grove keeps your GitHub projects in one list and installs and opens them for you. "
-                             "Press the button to bring in your repos, then click one in the list.")
+                if hack else "Your GitHub projects, all in one cosy list. Grove installs and opens them for you. "
+                             "Press the button to bring your repos in, then tap one.")
             if hack:
                 page.set_paintable(None)
                 box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, halign=Gtk.Align.CENTER)
@@ -1082,8 +1158,12 @@ class Grove(Adw.ApplicationWindow):
                 page.set_child(box)
                 parent = box
             else:
-                page.set_icon_name(ICON_NAME if Gtk.IconTheme.get_for_display(self.get_display()).has_icon(ICON_NAME)
-                                   else "folder-symbolic")
+                tex = self.icon_for({"id": "mascot-grove", "name": "grove", "path": ""})
+                if tex is not None:
+                    page.set_paintable(tex)
+                else:
+                    page.set_icon_name(ICON_NAME if Gtk.IconTheme.get_for_display(self.get_display()).has_icon(ICON_NAME)
+                                       else "folder-symbolic")
                 parent = Gtk.Box(halign=Gtk.Align.CENTER)
                 page.set_child(parent)
             btn = Gtk.Button(label=self.T("Sync from GitHub"), halign=Gtk.Align.CENTER,
@@ -2081,7 +2161,11 @@ class Grove(Adw.ApplicationWindow):
         def page(title, icon, text, widgets=(), buttons=()):
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, margin_top=12, margin_bottom=18,
                           margin_start=24, margin_end=24, valign=Gtk.Align.CENTER)
-            box.append(Gtk.Image(icon_name=icon, pixel_size=64, css_classes=["dim-label"]))
+            mascot = self.mascot(icon)
+            if mascot is not None:
+                box.append(mascot)
+            else:
+                box.append(Gtk.Image(icon_name=icon, pixel_size=64, css_classes=["dim-label"]))
             box.append(Gtk.Label(label=title, css_classes=["title-1"], wrap=True, justify=Gtk.Justification.CENTER))
             box.append(Gtk.Label(label=text, wrap=True, justify=Gtk.Justification.CENTER))
             for w in widgets:
@@ -2097,7 +2181,7 @@ class Grove(Adw.ApplicationWindow):
             return Adw.NavigationPage(title=title, child=tv)
 
         def last():
-            nav.push(page("Click a project, press the big button", "media-playback-start-symbolic",
+            nav.push(page("Click a project, press the big button", "mascot:spare",
                           "Tap any project in the list. If it isn't on your computer yet, the big button says \"Get\": "
                           "it downloads the project and sets it up. After that the same button says \"Open\".\n\n"
                           "Got a private repo from a friend? Menu > Share a private repo. "
@@ -2118,12 +2202,12 @@ class Grove(Adw.ApplicationWindow):
                     self.save()
                 self.sync()
                 last()
-            nav.push(page("Bring in your projects", "view-refresh-symbolic",
+            nav.push(page("Bring in your projects", "mascot:desktop-buddy",
                           "Grove lists your public repos from just a username. If you have the GitHub tool (gh) signed in, "
                           "it also lists your private ones.",
                           widgets=[lst], buttons=[("Sync from GitHub", go, True), ("Skip", last, False)]))
 
-        nav.push(page("Welcome to Grove", "folder-symbolic",
+        nav.push(page("Welcome to Grove", "mascot:Treeyagi",
                       "Grove puts your GitHub projects in one tidy list. It can download, install and open them for you, "
                       "with one click, and keeps them up to date.",
                       buttons=[("Show me how", second, True)]))
