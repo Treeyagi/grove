@@ -856,10 +856,27 @@ class Grove(Adw.ApplicationWindow):
     def bg_path(self, kind):
         return os.path.join(BG_DIR, BG_FILES[kind][self._bg_fmt])
 
+    def stop_background(self):
+        """Take the playing video out of the window first: swapping it while it draws crashes GTK's renderer."""
+        old = self.bg_video.get_paintable()
+        self.bg_video.set_paintable(None)
+        if old is not None:
+            old.pause()
+            old.clear()
+            self._bg_old = old   # keep it alive a moment so a frame in flight can finish
+            GLib.timeout_add(1500, lambda: setattr(self, "_bg_old", None) or False)
+
     def apply_background(self):
+        self.stop_background()
         kind = self.bg_kind()
         path = self.bg_path(kind)
         if self.settings.get("background") == "farm" and os.path.exists(path):
+            GLib.timeout_add(250, lambda: self._start_background(kind, path) or False)
+            return
+        self._start_background("", "")
+
+    def _start_background(self, kind, path):
+        if kind and self.settings.get("background") == "farm" and os.path.exists(path):
             media = Gtk.MediaFile.new_for_filename(path)
             media.set_loop(True)
             media.set_muted(True)
@@ -870,7 +887,6 @@ class Grove(Adw.ApplicationWindow):
             self.add_css_class("has-bg")
             self.scrim.set_visible(True)
         else:
-            self.bg_video.set_paintable(None)
             self._bg_kind = ""
             self.remove_css_class("has-bg")
             self.scrim.set_visible(False)
