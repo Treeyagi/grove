@@ -117,7 +117,7 @@ def default_settings():
         "editor": detect(["code", "codium", "zed", "kate", "gedit"], "xdg-open"),
         "terminal": detect(list(TERMINAL_FLAGS), "xterm"),
         "projects_dir": os.path.expanduser("~/Projects"),
-        "hackers": True,
+        "hackers": False,      # the hacker-movie theme is opt-in (menu > Hackers theme); saved choices are kept
         "extra_users": [],     # other GitHub accounts whose public repos to follow
         "public_only": False,  # never import private repos
         "prefer_releases": True,  # Install and Run download a repo's latest release when it has one
@@ -670,7 +670,8 @@ class Grove(Adw.ApplicationWindow):
         menu = Gio.Menu()
         menu.append("Re-read all READMEs", "win.readmes")
         menu.append("Bring back removed repos", "win.restore")
-        menu.append("Hackers theme", "win.hackers")
+        menu.append("Hacker-movie theme", "win.hackers")
+        menu.append("Welcome tour", "win.welcome")
         menu.append("Share a private repo…", "win.share")
         menu.append("Update Grove", "win.update")
         menu.append("Settings", "win.settings")
@@ -678,6 +679,9 @@ class Grove(Adw.ApplicationWindow):
         act = Gio.SimpleAction.new("settings", None)
         act.connect("activate", lambda *_: self.show_settings())
         self.add_action(act)
+        tour = Gio.SimpleAction.new("welcome", None)
+        tour.connect("activate", lambda *_: self.show_welcome())
+        self.add_action(tour)
         share = Gio.SimpleAction.new("share", None)
         share.connect("activate", lambda *_: self.show_share_wizard())
         self.add_action(share)
@@ -952,8 +956,8 @@ class Grove(Adw.ApplicationWindow):
             page = Adw.StatusPage(
                 title="ACCESS GRANTED" if hack else "Grove",
                 description="Select a target from the tree, or jack into GitHub to pull your repos."
-                if hack else "Pull in your GitHub repos, sort them into groups, "
-                             "and open or run them with one click.")
+                if hack else "Grove keeps your GitHub projects in one list and installs and opens them for you. "
+                             "Press the button to bring in your repos, then click one in the list.")
             if hack:
                 page.set_paintable(None)
                 box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, halign=Gtk.Align.CENTER)
@@ -972,7 +976,12 @@ class Grove(Adw.ApplicationWindow):
             btn = Gtk.Button(label=self.T("Sync from GitHub"), halign=Gtk.Align.CENTER,
                              css_classes=["suggested-action", "pill"])
             btn.connect("clicked", lambda *_: self.sync())
+            parent.set_orientation(Gtk.Orientation.VERTICAL) if isinstance(parent, Gtk.Box) else None
+            parent.set_spacing(8) if isinstance(parent, Gtk.Box) else None
             parent.append(btn)
+            tour = Gtk.Button(label=self.T("How does this work?"), halign=Gtk.Align.CENTER, css_classes=["flat"])
+            tour.connect("clicked", lambda *_: self.show_welcome())
+            parent.append(tour)
         elif node.is_group:
             page = self.group_page(node)
         else:
@@ -1067,29 +1076,27 @@ class Grove(Adw.ApplicationWindow):
         about.add(card)
         page.add(about)
 
-        # launch
+        # what to do next: one big button, then the rest
         launch = Adw.PreferencesGroup()
-        bar = Gtk.Box(spacing=8, homogeneous=True)
-        for icon, label, tip, fn, css in [
-            ("document-edit-symbolic", "Editor", "Open the project folder in your editor",
-             lambda *_: self.open_editor(d), []),
-            ("utilities-terminal-symbolic", "Terminal", "Open a terminal in the project folder",
-             lambda *_: self.open_terminal(d), []),
-            ("system-software-install-symbolic", "Install", "Download it first if needed, then install it",
-             lambda b: self.install(d, b), []),
-            ("media-playback-start-symbolic", "Run", "Run it (opens the live site for deployed web projects; otherwise runs in a terminal)",
-             lambda b: self.run_project(d, b), ["suggested-action"]),
-            ("folder-open-symbolic", "Files", "Open the folder in your file manager",
-             lambda *_: self.open_folder(d), []),
-            ("web-browser-symbolic", "GitHub", "Open the repository page in your browser",
-             lambda *_: self.open_url(d), []),
-        ] + ([("applications-internet-symbolic", "Live", "Open the deployed site (GitHub Pages)",
-               lambda *_: self.open_site(d), [])] if d.get("site") else []):
-            b = Gtk.Button(child=Adw.ButtonContent(icon_name=icon, label=self.T(label)),
-                           css_classes=css, tooltip_text=tip)
-            b.connect("clicked", fn)
-            bar.append(b)
-        launch.add(bar)
+        here = self.cloned(d)
+        rel = d.get("release") or {}
+        if here:
+            where = "On this computer" + (f" · {rel['tag']}" if rel.get("tag") else "")
+        elif d["url"]:
+            where = "Not on this computer yet. The big button downloads it, sets it up and opens it."
+        else:
+            where = "No repository or folder set yet: open \"Edit details and commands\" below."
+        launch.add(Gtk.Label(label=where, xalign=0, wrap=True, css_classes=["dim-label"], margin_bottom=8))
+        if d.get("site") and not here and not d.get("run"):
+            icon, label, tip = "web-browser-symbolic", "Open website", "Opens the live site in your browser"
+        elif here:
+            icon, label, tip = "media-playback-start-symbolic", "Open", "Start it (in a terminal window when it needs one)"
+        else:
+            icon, label, tip = "system-software-install-symbolic", "Install & open", "Download it, set it up, then start it"
+        main = Gtk.Button(child=Adw.ButtonContent(icon_name=icon, label=self.T(label)),
+                          css_classes=["suggested-action", "pill"], tooltip_text=tip, halign=Gtk.Align.START)
+        main.connect("clicked", lambda b: self.run_project(d, b))
+        launch.add(main)
         newer = self.latest_tags.get(d["id"])
         if newer and d.get("release") and newer["tag"] != d["release"]["tag"]:
             up = Gtk.Button(child=Adw.ButtonContent(icon_name="software-update-available-symbolic",
@@ -1100,6 +1107,26 @@ class Grove(Adw.ApplicationWindow):
         elif d.get("release") and self.cloned(d):
             GLib.idle_add(self.check_update, d)
         page.add(launch)
+
+        more = Adw.PreferencesGroup(title=self.T("More things you can do"))
+        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=3, min_children_per_line=2,
+                           column_spacing=8, row_spacing=8, homogeneous=True)
+        for icon, label, tip, fn, needs_folder in [
+            ("system-software-install-symbolic", "Install again" if here else "Install only",
+             "Download it if needed and run its install step, without starting it", lambda b: self.install(d, b), False),
+            ("document-edit-symbolic", "Edit code", "Open the project folder in your editor", lambda *_: self.open_editor(d), True),
+            ("utilities-terminal-symbolic", "Terminal", "Open a terminal in the project folder", lambda *_: self.open_terminal(d), True),
+            ("folder-open-symbolic", "Show folder", "Open the folder in your file manager", lambda *_: self.open_folder(d), True),
+            ("web-browser-symbolic", "GitHub page", "Open the repository page in your browser", lambda *_: self.open_url(d), False),
+        ] + ([("applications-internet-symbolic", "Live site", "Open the deployed site (GitHub Pages)",
+               lambda *_: self.open_site(d), False)] if d.get("site") else []):
+            b = Gtk.Button(child=Adw.ButtonContent(icon_name=icon, label=self.T(label)),
+                           tooltip_text=tip if here or not needs_folder else "Get it first: use the big button above")
+            b.set_sensitive(here or not needs_folder)
+            b.connect("clicked", fn)
+            flow.append(b)
+        more.add(flow)
+        page.add(more)
 
         # advanced, tucked away
         adv = Adw.PreferencesGroup()
@@ -1430,7 +1457,7 @@ class Grove(Adw.ApplicationWindow):
     def project_dir(self, d):
         path = os.path.expanduser(d["path"]) if d["path"] else ""
         if not os.path.isdir(path):
-            self.toast("Folder not found: clone the project or set its folder first")
+            self.toast("This project isn't on your computer yet: use the big Install & open button")
             return None
         return path
 
@@ -1452,7 +1479,7 @@ class Grove(Adw.ApplicationWindow):
             return
         install, run = detect_commands(path)
         if not (install or run):
-            self.toast("Couldn't recognise this project type, set the commands by hand")
+            self.toast("Grove couldn't work out how to install or start this one: type the commands in by hand")
             return
         for key, row, val in (("install", install_row, install), ("run", run_row, run)):
             if val and (force or not d.get(key)):
@@ -1489,7 +1516,7 @@ class Grove(Adw.ApplicationWindow):
             if self.settings.get("prefer_releases", True) and repo_slug(d["url"]) and not d.get("release"):
                 self._install_from_release(d, button)   # a source clone with nothing to install: maybe a release has it
                 return
-            self.toast("No install step detected: it's ready to run, or set one by hand")
+            self.toast("Nothing to install for this one: just press Open")
             return
         self.open_terminal(d, d["install"])
 
@@ -1498,7 +1525,7 @@ class Grove(Adw.ApplicationWindow):
         to download, get that instead (the old folder is renamed, not deleted) and install it."""
         def got(rel):
             if not (rel and pick_asset(rel["assets"])):
-                self.toast("No install step detected: it's ready to run, or set one by hand")
+                self.toast("Nothing to install for this one: just press Open")
                 return
             self.toast(f"No installer in the source: downloading release {rel['tag']} (old folder kept as .old-…)")
             self.clone(d, button, then=lambda: self.install(d))
@@ -1541,7 +1568,7 @@ class Grove(Adw.ApplicationWindow):
                 if not steps:
                     return
             else:
-                self.toast("No run command: set one (or press detect)")
+                self.toast("Grove couldn't work out how to start this one. Open \"Edit details and commands\" and press the magnifier to detect it, or type the command.")
         if steps:
             self.open_terminal(d, " && ".join(steps))
 
@@ -1933,6 +1960,65 @@ class Grove(Adw.ApplicationWindow):
         self.rebuild(d["id"])
 
     # ---- settings ----------------------------------------------------
+    # ---- first-run welcome ---------------------------------------------------
+    def show_welcome(self):
+        """A three-page tour: what Grove is, bring in your repos, install your first one."""
+        dlg = Adw.Dialog(title="Welcome to Grove", content_width=520, content_height=520)
+        nav = Adw.NavigationView()
+        dlg.set_child(nav)
+        dlg.connect("closed", lambda *_: (self.data.__setitem__("welcomed", True), self.save()))
+
+        def page(title, icon, text, widgets=(), buttons=()):
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, margin_top=12, margin_bottom=18,
+                          margin_start=24, margin_end=24, valign=Gtk.Align.CENTER)
+            box.append(Gtk.Image(icon_name=icon, pixel_size=64, css_classes=["dim-label"]))
+            box.append(Gtk.Label(label=title, css_classes=["title-1"], wrap=True, justify=Gtk.Justification.CENTER))
+            box.append(Gtk.Label(label=text, wrap=True, justify=Gtk.Justification.CENTER))
+            for w in widgets:
+                box.append(w)
+            row = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER, margin_top=8)
+            for label, fn, suggested in buttons:
+                b = Gtk.Button(label=label, css_classes=["pill"] + (["suggested-action"] if suggested else []))
+                b.connect("clicked", lambda *_, fn=fn: fn())
+                row.append(b)
+            box.append(row)
+            tv = Adw.ToolbarView(content=Gtk.ScrolledWindow(child=box, vexpand=True))
+            tv.add_top_bar(Adw.HeaderBar())
+            return Adw.NavigationPage(title=title, child=tv)
+
+        def last():
+            nav.push(page("Click a project, press the big button", "media-playback-start-symbolic",
+                          "Pick any project in the list on the left. If it isn't on your computer yet, "
+                          "\"Install & open\" downloads it, sets it up and starts it. Next time it just says \"Open\".\n\n"
+                          "Got a private repo from a friend? Menu > Share a private repo. "
+                          "Prefer a different look? Menu > Hacker-movie theme.",
+                          buttons=[("Start using Grove", dlg.close, True)]))
+
+        def second():
+            lst = Gtk.ListBox(css_classes=["boxed-list"], selection_mode=Gtk.SelectionMode.NONE)
+            who = Adw.EntryRow(title="Your GitHub username (optional)")
+            lst.append(who)
+
+            def go():
+                name = who.get_text().strip().lstrip("@")
+                if name and USERNAME.fullmatch(name) and name.lower() != FEATURED.lower():
+                    users = self.settings.setdefault("extra_users", [])
+                    if name not in users:
+                        users.append(name)
+                    self.save()
+                self.sync()
+                last()
+            nav.push(page("Bring in your projects", "view-refresh-symbolic",
+                          "Grove lists your public repos from just a username. If you have the GitHub tool (gh) signed in, "
+                          "it also lists your private ones.",
+                          widgets=[lst], buttons=[("Sync from GitHub", go, True), ("Skip", last, False)]))
+
+        nav.push(page("Welcome to Grove", "folder-symbolic",
+                      "Grove puts your GitHub projects in one tidy list. It can download, install and open them for you, "
+                      "with one click, and keeps them up to date.",
+                      buttons=[("Show me how", second, True)]))
+        dlg.present(self)
+
     # ---- sharing a private repo (wizard) -----------------------------------
     def check_token(self, token, cb):
         """cb(summary or None, error text): what this token can see on GitHub, without saving it."""
@@ -2162,6 +2248,8 @@ class App(Adw.Application):
         if not win:
             win = Grove(self)
             GLib.timeout_add_seconds(3, lambda: win.update_self(quiet=True) and False)
+            if not win.data.get("welcomed") and not any(d["type"] == "project" for d, *_ in walk(win.tree)):
+                GLib.timeout_add(400, lambda: win.show_welcome() and False)   # after the window is on screen
         win.present()
 
 

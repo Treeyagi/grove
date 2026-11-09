@@ -28,6 +28,8 @@ Options go after `sh -s --`, for example `... | sh -s -- --no-launch` or `... | 
 
 ## Using it
 
+First launch shows a short welcome tour (reopen it from the menu). Click a project and press the big button: **Install & open** downloads, sets up and starts it; once it's on your computer the button says **Open**.
+
 - Press the refresh button to sync your repos into an "Unsorted" group, then move them into your own groups.
 - Every project shows a plain-language summary taken from its README (with a button to read the whole thing),
   and the tree shows a one-line blurb under each name. Use the search box to find a repo by what it does.
