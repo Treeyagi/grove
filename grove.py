@@ -516,6 +516,91 @@ def _own_install(path, run):
     return f"{run} --install" if b"--install" in head else ""
 
 
+# ---- uninstalling ---------------------------------------------------------------------------
+def inside(path, folder):
+    """Is path the folder or somewhere under it (symlinks resolved)?"""
+    p, f = os.path.realpath(os.path.expanduser(path)), os.path.realpath(os.path.expanduser(folder))
+    return p == f or p.startswith(f + os.sep)
+
+
+def apps_dir():
+    return os.path.join(GLib.get_user_data_dir(), "applications")
+
+
+def start_menu_entries(folder, directory=None):
+    """The user's start-menu entries (.desktop files) that belong to a project folder: their Exec, TryExec or Path
+    points into it. Returns [(file, name, icon)]. Nothing outside ~/.local/share/applications is ever listed."""
+    directory = directory or apps_dir()
+    found = []
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return found
+    for n in names:
+        f = os.path.join(directory, n)
+        if not n.endswith(".desktop") or not os.path.isfile(f):
+            continue
+        keys = {}
+        try:
+            with open(f, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    k, _, v = line.rstrip("\n").partition("=")
+                    if k in ("Name", "Exec", "TryExec", "Path", "Icon") and k not in keys:
+                        keys[k] = v.strip()
+        except OSError:
+            continue
+        points = [keys.get("Path", "")]
+        for k in ("Exec", "TryExec"):
+            try:
+                points.append(shlex.split(keys.get(k, ""))[0])
+            except (ValueError, IndexError):
+                pass
+        if any(x and os.path.isabs(x) and inside(x, folder) for x in points):
+            found.append((f, keys.get("Name", n), keys.get("Icon", "")))
+    return found
+
+
+def remove_start_menu(entries, icons_root=None):
+    """Delete those start-menu entries, and any icon they installed by name in the user's icon folders. Returns how many."""
+    icons_root = icons_root or os.path.join(GLib.get_user_data_dir(), "icons")
+    n = 0
+    for f, _name, icon in entries:
+        try:
+            os.remove(f)
+            n += 1
+        except OSError:
+            continue
+        if icon and os.sep not in icon:   # a theme icon name; a path inside the project goes with the folder
+            for root, _dirs, files in os.walk(icons_root):
+                for fn in files:
+                    if os.path.splitext(fn)[0] == icon and os.path.splitext(fn)[1] in (".svg", ".png", ".xpm"):
+                        try:
+                            os.remove(os.path.join(root, fn))
+                        except OSError:
+                            pass
+    return n
+
+
+def safe_project_folder(path, projects_dir):
+    """May Grove delete this folder? Only one strictly inside the Projects folder, never the Projects folder or home."""
+    if not path:
+        return False
+    p = os.path.realpath(os.path.expanduser(path))
+    root = os.path.realpath(os.path.expanduser(projects_dir))
+    home = os.path.realpath(os.path.expanduser("~"))
+    return p.startswith(root + os.sep) and p != root and p != home and not home.startswith(p + os.sep)
+
+
+def own_uninstall(path, run):
+    """'./app --uninstall' when the program says it has an --uninstall option in its first few KB. Empty otherwise."""
+    try:
+        with open(os.path.join(path, shlex.split(run)[0]), "rb") as f:
+            head = f.read(4096)
+    except (OSError, ValueError, IndexError):
+        return ""
+    return f"{run} --uninstall" if b"--uninstall" in head else ""
+
+
 def _deps_step(path, run):
     """A command that installs what the project needs before it is installed or run: the program's own
     `--deps` option, or an install-deps.sh in the folder. Adds --yes when the script says it understands it."""
@@ -1302,6 +1387,10 @@ class Grove(Adw.ApplicationWindow):
             mine.add(nav_row("Show the folder", "folder-open-symbolic", lambda: self.open_folder(d)))
             mine.add(nav_row("Edit the code", "document-edit-symbolic", lambda: self.open_editor(d)))
             mine.add(nav_row("Open a terminal here", "utilities-terminal-symbolic", lambda: self.open_terminal(d)))
+            un = nav_row("Uninstall…", "user-trash-symbolic", lambda: self.confirm_uninstall(d),
+                         "Remove it from the start menu and delete its folder")
+            un.add_css_class("error")
+            mine.add(un)
         page.add(mine)
 
         # advanced, tucked away
@@ -1634,6 +1723,66 @@ class Grove(Adw.ApplicationWindow):
         if not parent:
             self.sel.set_selected(Gtk.INVALID_LIST_POSITION)
         self.toast(f"Removed {d['name']}{note}")
+
+    def confirm_uninstall(self, d):
+        path = os.path.expanduser(d["path"]) if d.get("path") else ""
+        entries = start_menu_entries(path) if path else []
+        can_delete = safe_project_folder(path, self.settings["projects_dir"])
+        lines = []
+        if entries:
+            lines.append("Start menu: " + ", ".join(name for _f, name, _i in entries))
+        else:
+            lines.append("Start menu: nothing of it is installed there.")
+        if can_delete:
+            lines.append(f"Folder deleted: {path}")
+            try:
+                if os.path.isdir(os.path.join(path, ".git")) and subprocess.run(
+                        ["git", "-C", path, "status", "--porcelain"], capture_output=True, text=True,
+                        timeout=10).stdout.strip():
+                    lines.append("It has uncommitted changes that would be lost.")
+            except (OSError, subprocess.SubprocessError):
+                pass
+        else:
+            lines.append(f"The folder ({path}) is outside your Projects folder, so Grove leaves it alone.")
+        lines.append("It stays on your Grove list, and you can Get it again any time. Your GitHub repo is not touched.")
+        dlg = Adw.AlertDialog(heading=f"Uninstall {d['name']}?", body="\n\n".join(lines))
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("uninstall", "Uninstall")
+        dlg.set_response_appearance("uninstall", Adw.ResponseAppearance.DESTRUCTIVE)
+        dlg.set_default_response("cancel")
+        dlg.set_close_response("cancel")
+        dlg.connect("response", lambda _d, r: r == "uninstall" and self.uninstall(d))
+        dlg.present(self)
+
+    def uninstall(self, d):
+        """Run the project's own --uninstall if it has one, remove its start-menu entries, then delete its folder
+        (only when it sits inside the Projects folder). The project stays on the list as 'not installed'."""
+        path = os.path.expanduser(d["path"]) if d.get("path") else ""
+        if not path or not os.path.isdir(path):
+            self.toast("It isn't on this computer")
+            return
+        own = own_uninstall(path, d.get("run") or "")
+
+        def finish(note=""):
+            entries = start_menu_entries(path)       # looked up again: its own uninstall may have removed some
+            n = remove_start_menu(entries)
+            kept = ""
+            if safe_project_folder(path, self.settings["projects_dir"]):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                kept = " The folder was left in place (it is outside your Projects folder)."
+            d["release"] = None
+            self.save()
+            self._refresh_if_current(d)
+            self.toast(f"Uninstalled {d['name']}: removed {n} start-menu entr{'y' if n == 1 else 'ies'}."
+                       f"{'' if kept else ' Folder deleted.'}{kept}{note}")
+
+        if own:
+            cmd = f"cd {shlex.quote(path)} && timeout 60 {own} </dev/null"
+            self.run_async(["sh", "-c", cmd],
+                           lambda proc, _o, _e: finish("" if proc.get_exit_status() == 0 else " Its own uninstall step reported a problem."))
+        else:
+            finish()
 
     def restore_removed(self):
         n = len(self.data.get("hidden", []))
