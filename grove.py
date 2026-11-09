@@ -862,7 +862,6 @@ class Grove(Adw.ApplicationWindow):
         self.bg_video.set_paintable(None)
         if old is not None:
             old.pause()
-            old.clear()
             self._bg_old = old   # keep it alive a moment so a frame in flight can finish
             GLib.timeout_add(1500, lambda: setattr(self, "_bg_old", None) or False)
 
@@ -927,6 +926,11 @@ class Grove(Adw.ApplicationWindow):
         action.set_state(value)
         self.settings["background"] = "farm" if on else ""
         self.save()
+        GLib.timeout_add(250, lambda: self._farm_changed(on, action) or False)   # let the menu finish closing first
+
+    def _farm_changed(self, on, action):
+        if bool(self.settings.get("background")) != on:   # flipped again in the meantime
+            return
         if not on:
             self.apply_background()
             return
@@ -944,7 +948,7 @@ class Grove(Adw.ApplicationWindow):
 
     def _bg_tick(self):
         """Swap to the other video when the window changes from tall to wide (or back)."""
-        if self.settings.get("background") == "farm" and not self._bg_busy and self.bg_kind() != self._bg_kind:
+        if self.settings.get("background") == "farm" and self._bg_kind and not self._bg_busy and self.bg_kind() != self._bg_kind:
             kind = self.bg_kind()
             self._bg_busy = True
 
@@ -1025,7 +1029,7 @@ class Grove(Adw.ApplicationWindow):
             self.toast("Updated: restarting Grove…")
             spawn([sys.executable, INSTALLED])
             GLib.timeout_add(600, lambda: self.get_application().quit())
-        self.run_async(["curl", "-fsSL", "--max-time", "15", SELF_URL], got)
+        self.run_async(["curl", "-fsSL", "--max-time", "15", f"{SELF_URL}?t={int(time.time())}"], got)   # the ?t= skips GitHub's cache
 
     def toast(self, msg):
         self.toasts.add_toast(Adw.Toast(title=msg, timeout=4))

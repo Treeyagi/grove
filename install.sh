@@ -32,7 +32,7 @@ if [ -n "$here" ] && [ -f "$here/grove.py" ]; then
   cp "$here/grove.svg" "$ICONS/$ICON_NAME.svg" 2>/dev/null || true
 else
   command -v curl >/dev/null || { echo "curl is required." >&2; exit 1; }
-  curl -fsSL "$BASE/grove.py" -o "$DEST/grove.py.tmp" && mv "$DEST/grove.py.tmp" "$DEST/grove.py"
+  curl -fsSL "$BASE/grove.py?t=$(date +%s)" -o "$DEST/grove.py.tmp" && mv "$DEST/grove.py.tmp" "$DEST/grove.py"
   curl -fsSL "$BASE/grove.svg" -o "$ICONS/$ICON_NAME.svg" 2>/dev/null || true
 fi
 command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
