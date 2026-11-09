@@ -29,6 +29,11 @@ INBOX = "Unsorted"
 FEATURED = "Treeyagi"  # always synced and pinned first, for everyone
 SELF_URL = "https://raw.githubusercontent.com/Treeyagi/grove/main/grove.py"
 INSTALLED = os.path.join(GLib.get_user_data_dir(), "grove", "grove.py")   # where install.sh puts it
+# the optional moving background: two looping videos (tall and wide) fetched the first time it is switched on
+BG_BASE = "https://github.com/Treeyagi/grove/releases/download/backgrounds-v1/"
+BG_DIR = os.path.join(GLib.get_user_data_dir(), "grove", "backgrounds")
+# MPEG-TS first (it plays with the common GStreamer "bad" plugins), MP4 as the fallback ("good" plugins)
+BG_FILES = {"portrait": ("farm-portrait.ts", "farm-portrait.mp4"), "wide": ("farm-wide.ts", "farm-wide.mp4")}
 USERNAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 
 # argv inserted between the terminal executable and the command to run
@@ -118,6 +123,11 @@ APP_CSS = """
 .hero-title { font-size: 30px; font-weight: 800; }
 button.get-button { font-weight: 800; font-size: 17px; padding: 8px 44px; min-height: 40px; }
 .section-title { font-weight: 700; font-size: 13px; opacity: 0.6; }
+.bg-scrim { background-color: alpha(@window_bg_color, 0.72); }
+window.has-bg list.boxed-list, window.has-bg .card { background-color: alpha(@card_bg_color, 0.9); }
+window.has-bg headerbar, window.has-bg toolbarview, window.has-bg navigation-view, window.has-bg navigation-split-view,
+window.has-bg .sidebar-pane, window.has-bg .content-pane, window.has-bg .view, window.has-bg scrolledwindow,
+window.has-bg preferencespage { background: transparent; box-shadow: none; }
 .row-title { font-weight: 600; }
 listview.home-list { background: transparent; }
 listview.home-list > row { margin: 1px 10px; border-radius: 12px; }
@@ -138,6 +148,7 @@ def default_settings():
         "extra_users": [],     # other GitHub accounts whose public repos to follow
         "public_only": False,  # never import private repos
         "prefer_releases": True,  # Install and Run download a repo's latest release when it has one
+        "background": "",      # "farm" = the looping cow-farm video behind the app
     }
 
 
@@ -694,7 +705,16 @@ class Grove(Adw.ApplicationWindow):
         self.fetching = {}       # project id -> callbacks, for README downloads in flight
 
         self.toasts = Adw.ToastOverlay()
-        self.set_content(self.toasts)
+        # behind everything: the optional looping video, and a soft veil so the text stays easy to read
+        self.bg_video = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True, hexpand=True, vexpand=True)
+        self.scrim = Gtk.Box(css_classes=["bg-scrim"], can_target=False, visible=False)
+        layers = Gtk.Overlay(child=self.bg_video)
+        layers.add_overlay(self.scrim)
+        layers.add_overlay(self.toasts)
+        layers.set_measure_overlay(self.toasts, True)
+        self.set_content(layers)
+        self._bg_kind, self._bg_busy = "", False
+        self._bg_fmt = int(self.settings.get("background_fmt", 0))   # which file type this computer can play
         # one screen at a time, like a phone: the project list, and a page for the one you tapped
         self.split = Adw.NavigationSplitView(collapsed=True, min_sidebar_width=280, max_sidebar_width=900)
         self.split.connect("notify::show-content", self._on_back)
@@ -720,6 +740,7 @@ class Grove(Adw.ApplicationWindow):
         top.append("Update Grove", "win.update")
         menu.append_section(None, top)
         more = Gio.Menu()
+        more.append("Cow farm background", "win.farm")
         more.append("Hacker-movie theme", "win.hackers")
         more.append("Re-read all READMEs", "win.readmes")
         more.append("Bring back removed repos", "win.restore")
@@ -738,6 +759,11 @@ class Grove(Adw.ApplicationWindow):
             "hackers", None, GLib.Variant.new_boolean(self.settings["hackers"]))
         theme.connect("change-state", self._toggle_hackers)
         self.add_action(theme)
+        self.farm_action = Gio.SimpleAction.new_stateful(
+            "farm", None, GLib.Variant.new_boolean(self.settings.get("background") == "farm"))
+        self.farm_action.connect("change-state", self._toggle_farm)
+        self.add_action(self.farm_action)
+        GLib.timeout_add_seconds(2, self._bg_tick)
 
         factory = Gtk.SignalListItemFactory()
         factory.connect("setup", self._row_setup)
@@ -771,6 +797,7 @@ class Grove(Adw.ApplicationWindow):
         self.connect("close-request", self._on_close)
         self.load_css()
         self.apply_theme()
+        self.apply_background()
         self.rebuild()
         GLib.idle_add(self.auto_sync)
         GLib.idle_add(self.prefetch_readmes)
@@ -819,6 +846,98 @@ class Grove(Adw.ApplicationWindow):
         self.content_page.set_title("PAYLOAD" if on else "Details")
         if self.detail.get_child():
             self.show_detail()
+
+    # ---- moving background -------------------------------------------
+    def bg_kind(self):
+        """Tall window gets the portrait video, wide window the landscape one."""
+        w, h = self.get_width(), self.get_height()
+        return "wide" if w > h * 1.15 else "portrait"
+
+    def bg_path(self, kind):
+        return os.path.join(BG_DIR, BG_FILES[kind][self._bg_fmt])
+
+    def apply_background(self):
+        kind = self.bg_kind()
+        path = self.bg_path(kind)
+        if self.settings.get("background") == "farm" and os.path.exists(path):
+            media = Gtk.MediaFile.new_for_filename(path)
+            media.set_loop(True)
+            media.set_muted(True)
+            media.connect("notify::error", self._bg_error)
+            media.play()
+            self.bg_video.set_paintable(media)
+            self._bg_kind = kind
+            self.add_css_class("has-bg")
+            self.scrim.set_visible(True)
+        else:
+            self.bg_video.set_paintable(None)
+            self._bg_kind = ""
+            self.remove_css_class("has-bg")
+            self.scrim.set_visible(False)
+
+    def _bg_error(self, media, _pspec):
+        """This computer can't play that file type: try the other one, and if both fail, switch the option off."""
+        if not media.get_error() or self.bg_video.get_paintable() is not media:
+            return
+        if self._bg_fmt == 0:
+            self._bg_fmt = 1
+            self.settings["background_fmt"] = 1
+            self.save()
+            self.fetch_background(self.bg_kind(), lambda ok: self.apply_background() if ok else None)
+            return
+        self.toast("This computer can't play the background video (it needs the GStreamer video plugins)")
+        self.farm_action.change_state(GLib.Variant.new_boolean(False))
+
+    def fetch_background(self, kind, done):
+        """Download one of the videos (about a dozen MB) if it isn't here yet; done(ok)."""
+        path = self.bg_path(kind)
+        if os.path.exists(path):
+            done(True)
+            return
+        os.makedirs(BG_DIR, exist_ok=True)
+        tmp = path + ".part"
+
+        def got(proc, _o, _e):
+            ok = proc.get_exit_status() == 0 and os.path.getsize(tmp) > 100_000 if os.path.exists(tmp) else False
+            if ok:
+                os.replace(tmp, path)
+            elif os.path.exists(tmp):
+                os.remove(tmp)
+            done(ok)
+        self.run_async(["curl", "-fL", "--max-time", "600", "-o", tmp, BG_BASE + BG_FILES[kind][self._bg_fmt]], got)
+
+    def _toggle_farm(self, action, value):
+        on = value.get_boolean()
+        action.set_state(value)
+        self.settings["background"] = "farm" if on else ""
+        self.save()
+        if not on:
+            self.apply_background()
+            return
+        self.toast("Getting the cow farm video (about 10 MB, only the first time)…")
+
+        def done(ok):
+            if ok:
+                self.apply_background()
+            else:
+                self.toast("Couldn't download the background: check your internet and try again")
+                self.settings["background"] = ""
+                action.set_state(GLib.Variant.new_boolean(False))
+                self.save()
+        self.fetch_background(self.bg_kind(), done)
+
+    def _bg_tick(self):
+        """Swap to the other video when the window changes from tall to wide (or back)."""
+        if self.settings.get("background") == "farm" and not self._bg_busy and self.bg_kind() != self._bg_kind:
+            kind = self.bg_kind()
+            self._bg_busy = True
+
+            def done(ok):
+                self._bg_busy = False
+                if ok and self.bg_kind() == kind:
+                    self.apply_background()
+            self.fetch_background(kind, done)
+        return True
 
     def _toggle_hackers(self, action, value):
         action.set_state(value)
@@ -1231,18 +1350,18 @@ class Grove(Adw.ApplicationWindow):
 
     def big_icon(self, d):
         """The project's own icon if it has one, else a coloured tile with its first letter."""
-        tile = Gtk.Box(halign=Gtk.Align.CENTER, css_classes=["app-icon", "big", grad_class(d["name"])])
+        icon = project_icon(d)
+        if not icon:
+            tile = Gtk.Label(label=(d["name"][:1] or "?").upper(), halign=Gtk.Align.CENTER, valign=Gtk.Align.START,
+                             css_classes=["app-icon", "big", grad_class(d["name"])])
+            tile.set_size_request(104, 104)
+            return tile
+        tile = Gtk.Box(halign=Gtk.Align.CENTER, valign=Gtk.Align.START, css_classes=["app-icon", "big"])
         tile.set_size_request(104, 104)
         tile.set_overflow(Gtk.Overflow.HIDDEN)
-        icon = project_icon(d)
-        if icon:
-            pic = Gtk.Picture.new_for_filename(icon)
-            pic.set_content_fit(Gtk.ContentFit.COVER)
-            tile.append(pic)
-            tile.set_css_classes(["app-icon", "big"])
-            tile.set_size_request(104, 104)
-        else:
-            tile.append(Gtk.Label(label=(d["name"][:1] or "?").upper(), hexpand=True, vexpand=True))
+        pic = Gtk.Picture.new_for_filename(icon)
+        pic.set_content_fit(Gtk.ContentFit.COVER)
+        tile.append(pic)
         return tile
 
     # ---- readmes -------------------------------------------------------
