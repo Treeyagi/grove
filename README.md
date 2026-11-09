@@ -80,3 +80,7 @@ Menu > **Share a private repo…** opens a two-sided wizard.
 ## Memory
 
 Grove draws with GTK's plain CPU renderer by default, which keeps it around 90 MB instead of about 240 MB (it never loads the OpenGL stack). To use the GPU renderer instead, start it with `GSK_RENDERER=ngl`.
+
+## Project icons
+
+Every project gets an icon in the list and on its page. Grove picks, in order: your own `~/.config/grove/icons/<name>.svg` (or `.png`), an `icon`/`logo`/`<name>` image in the project's folder, a built-in funny icon for the repos it knows by name, then a coloured tile with the first letter.

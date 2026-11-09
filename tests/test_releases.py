@@ -163,5 +163,19 @@ rel = g.parse_release('{"tag_name":"v1","assets":[{"name":"a.zip","url":"https:/
 check("release: REST json too", (rel["assets"][0]["api"], rel["assets"][0]["url"]),
       ("https://api.github.com/repos/o/r/releases/assets/9", "https://github.com/o/r/releases/download/v1/a.zip"))
 
+# project icons
+d = tempfile.mkdtemp()
+g.ICON_DIR_USER, g.ICON_CACHE = os.path.join(d, "user"), os.path.join(d, "cache")
+proj = os.path.join(d, "proj"); os.makedirs(proj)
+mine = {"name": "Medllm", "path": ""}
+built = g.find_icon(mine)
+check("icon: built-in one is found by name (any case) and cached", (built is not None and built.startswith(g.ICON_CACHE), open(built).read().startswith("<svg")), (True, True))
+check("icon: every built-in is valid SVG text", all(v.startswith("<svg") and v.endswith("</svg>") for v in g.BUILTIN_ICONS.values()), True)
+check("icon: unknown project has none", g.find_icon({"name": "nobody-home", "path": ""}), None)
+open(os.path.join(proj, "icon.png"), "wb").write(b"x")
+check("icon: the project's own icon beats the built-in", g.find_icon({"name": "Medllm", "path": proj}), os.path.join(proj, "icon.png"))
+os.makedirs(g.ICON_DIR_USER); open(os.path.join(g.ICON_DIR_USER, "medllm.svg"), "w").write("<svg/>")
+check("icon: your own icon in ~/.config/grove/icons beats both", g.find_icon({"name": "Medllm", "path": proj}), os.path.join(g.ICON_DIR_USER, "medllm.svg"))
+
 print("\nALL OK" if not failed else f"\nFAILED: {failed}")
 sys.exit(1 if failed else 0)

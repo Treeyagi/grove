@@ -14,6 +14,7 @@ import tempfile
 import time
 import uuid
 import zipfile
+import zlib
 
 import gi
 
@@ -22,7 +23,7 @@ gi.require_version("Adw", "1")
 # GTK's plain CPU renderer draws this simple list with about a third of the memory of the OpenGL one
 # (it never loads the GL/LLVM stack). Set GSK_RENDERER=ngl before starting Grove to use the GPU one instead.
 os.environ.setdefault("GSK_RENDERER", "cairo")
-from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
 APP_ID = "io.github.grove.Launcher"
 ICON_NAME = "io.github.grove.Launcher"  # the wizard-tree icon installed by install.sh
@@ -693,6 +694,7 @@ class Grove(Adw.ApplicationWindow):
         self.sel = None
         self.expanded = set(self.data.get("expanded", []))
         self.query = ""
+        self.icons = {}          # project id -> icon texture (None = use the letter tile)
         self.readmes = {}        # project id -> README text ("" = repo has none)
         self.fetching = {}       # project id -> callbacks, for README downloads in flight
 
@@ -922,7 +924,21 @@ class Grove(Adw.ApplicationWindow):
         row = self.sel.get_selected_item() if self.sel else None
         return row.get_item() if row else None
 
+    def icon_for(self, d):
+        """The project's icon as a texture, or None. Looked up once per project and kept until the next rebuild."""
+        if d["id"] not in self.icons:
+            tex = None
+            path = find_icon(d)
+            if path:
+                try:
+                    tex = Gdk.Texture.new_from_filename(path)
+                except GLib.Error:
+                    tex = None
+            self.icons[d["id"]] = tex
+        return self.icons[d["id"]]
+
     def rebuild(self, select=None):
+        self.icons.clear()
         self.snapshot_expanded()
         cur = self.current()
         select = select or (cur.data["id"] if cur else None)
@@ -955,6 +971,7 @@ class Grove(Adw.ApplicationWindow):
         box = Gtk.Box(spacing=12, margin_top=6, margin_bottom=6)
         box.icon = Gtk.Label(css_classes=["app-icon", "small"], valign=Gtk.Align.CENTER)
         box.icon.set_size_request(40, 40)
+        box.pic = Gtk.Image(pixel_size=40, valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER)   # fixed size, whatever the row height
         # wrap instead of cutting off, so a narrow window stays readable (the blurb stops after 3 lines)
         box.label = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR, css_classes=["row-title"])
         box.sub = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR, lines=3,
@@ -970,7 +987,7 @@ class Grove(Adw.ApplicationWindow):
                               tooltip_text="Rename, move or delete this group")
         box.more.connect("clicked", lambda *_: self.open_group(box.node))
         box.grad = ""
-        for w in (box.icon, text, box.lock, box.badge, box.chev, box.more):
+        for w in (box.pic, box.icon, text, box.lock, box.badge, box.chev, box.more):
             box.append(w)
         item.set_child(Gtk.TreeExpander(child=box))
 
@@ -980,7 +997,10 @@ class Grove(Adw.ApplicationWindow):
         exp.set_list_row(row)
         box.node = node
         d = node.data
-        box.icon.set_visible(not node.is_group)
+        tex = None if node.is_group else self.icon_for(d)
+        box.pic.set_from_paintable(tex)
+        box.pic.set_visible(tex is not None)
+        box.icon.set_visible(not node.is_group and tex is None)
         box.chev.set_visible(not node.is_group)
         box.more.set_visible(node.is_group)
         box.sub.set_visible(not node.is_group)
@@ -1238,9 +1258,9 @@ class Grove(Adw.ApplicationWindow):
         return page
 
     def big_icon(self, d):
-        """The project's own icon if it has one, else a coloured tile with its first letter."""
-        icon = project_icon(d)
-        if not icon:
+        """The project's icon if it has one, else a coloured tile with its first letter."""
+        tex = self.icon_for(d)
+        if tex is None:
             tile = Gtk.Label(label=(d["name"][:1] or "?").upper(), halign=Gtk.Align.CENTER, valign=Gtk.Align.START,
                              css_classes=["app-icon", "big", grad_class(d["name"])])
             tile.set_size_request(104, 104)
@@ -1248,9 +1268,7 @@ class Grove(Adw.ApplicationWindow):
         tile = Gtk.Box(halign=Gtk.Align.CENTER, valign=Gtk.Align.START, css_classes=["app-icon", "big"])
         tile.set_size_request(104, 104)
         tile.set_overflow(Gtk.Overflow.HIDDEN)
-        pic = Gtk.Picture.new_for_filename(icon)
-        pic.set_content_fit(Gtk.ContentFit.COVER)
-        tile.append(pic)
+        tile.append(Gtk.Image(paintable=tex, pixel_size=104))
         return tile
 
     # ---- readmes -------------------------------------------------------
@@ -2328,6 +2346,50 @@ class Grove(Adw.ApplicationWindow):
                 self.sync()
         dlg.connect("response", resp)
         dlg.present(self)
+
+
+# ---- funny built-in project icons ------------------------------------------------------------------
+# Looked up by repo name. Your own icon wins: put <name>.svg or <name>.png in ~/.config/grove/icons/, or an
+# icon.svg / icon.png / logo.png in the project's folder. Projects with none get a coloured letter tile.
+BUILTIN_ICONS = {
+    "desktop-buddy": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5eead4"/><stop offset="1" stop-color="#0d9488"/></linearGradient></defs><rect width="256" height="256" rx="58" fill="url(#g)"/><g stroke="#2b1b0e" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"><circle cx="62" cy="150" r="13" fill="#ffd7b0"/><circle cx="194" cy="150" r="13" fill="#ffd7b0"/><ellipse cx="128" cy="146" rx="64" ry="70" fill="#ffd7b0"/><path d="M66 118 C52 66 118 26 178 48 C214 62 206 104 190 118 C176 92 146 84 118 94 C98 100 80 108 66 118 Z" fill="#3a2410"/><path d="M118 94 C128 60 170 48 204 70" fill="none" stroke="#6b4423" stroke-width="5"/><path d="M88 118 L116 108" fill="none" stroke-width="7"/><path d="M140 104 Q162 88 188 104" fill="none" stroke-width="7"/><ellipse cx="104" cy="134" rx="15" ry="18" fill="#fff"/><ellipse cx="153" cy="132" rx="16" ry="19" fill="#fff"/><circle cx="108" cy="136" r="7" fill="#111" stroke="none"/><circle cx="150" cy="134" r="8" fill="#111" stroke="none"/><path d="M128 140 Q120 164 134 166" fill="none" stroke="#c98f5f" stroke-width="4"/><path d="M84 172 Q128 222 172 172 Q128 186 84 172 Z" fill="#7a1f1f"/><path d="M90 174 Q128 189 166 174 L164 186 Q128 202 92 186 Z" fill="#fff" stroke-width="3"/></g><g stroke="#111" stroke-width="3" stroke-linecap="round"><ellipse cx="40" cy="62" rx="14" ry="9" fill="#fde047" transform="rotate(-20 40 62)"/><path d="M36 54 L34 70 M44 55 L42 71" /><ellipse cx="32" cy="52" rx="8" ry="5" fill="#e0f2fe" stroke="#0ea5e9" transform="rotate(-50 32 52)"/><ellipse cx="46" cy="50" rx="8" ry="5" fill="#e0f2fe" stroke="#0ea5e9" transform="rotate(-10 46 50)"/><ellipse cx="214" cy="204" rx="14" ry="9" fill="#fde047" transform="rotate(20 214 204)"/><path d="M210 196 L208 212 M219 197 L217 213"/><ellipse cx="206" cy="194" rx="8" ry="5" fill="#e0f2fe" stroke="#0ea5e9" transform="rotate(-40 206 194)"/><ellipse cx="222" cy="194" rx="8" ry="5" fill="#e0f2fe" stroke="#0ea5e9" transform="rotate(10 222 194)"/></g></svg>''',
+    "medllm": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#bfdbfe"/><stop offset="1" stop-color="#3b82f6"/></linearGradient></defs><rect width="256" height="256" rx="58" fill="url(#g)"/><g stroke="#7f1d1d" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"><path d="M128 220 C34 154 30 92 74 70 C102 58 124 76 128 94 C132 76 154 58 182 70 C226 92 222 154 128 220 Z" fill="#ef4444"/><path d="M72 92 Q82 76 102 82" fill="none" stroke="#fff" stroke-opacity=".7" stroke-width="7"/><g transform="rotate(-32 84 86)"><rect x="52" y="74" width="64" height="24" rx="10" fill="#fcd9a8" stroke="#a16207" stroke-width="4"/><circle cx="76" cy="86" r="2.6" fill="#a16207" stroke="none"/><circle cx="92" cy="86" r="2.6" fill="#a16207" stroke="none"/></g><ellipse cx="102" cy="128" rx="15" ry="18" fill="#fff" stroke-width="4"/><ellipse cx="154" cy="128" rx="15" ry="18" fill="#fff" stroke-width="4"/><circle cx="106" cy="134" r="7" fill="#111" stroke="none"/><circle cx="158" cy="134" r="7" fill="#111" stroke="none"/><path d="M104 172 q8 -10 16 0 t16 0 t16 0" fill="none" stroke="#450a0a" stroke-width="5"/></g><path d="M200 82 C192 96 190 104 200 108 C210 104 208 96 200 82 Z" fill="#bae6fd" stroke="#0369a1" stroke-width="3"/><g fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" opacity=".9"><path d="M30 232 L70 232 L82 212 L98 246 L112 224 L226 224"/></g></svg>''',
+    "cachyos-live-wallpapers": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#312e81"/><stop offset="1" stop-color="#6d28d9"/></linearGradient></defs><rect width="256" height="256" rx="58" fill="url(#g)"/><g fill="#fff" opacity=".85"><circle cx="40" cy="48" r="2.5"/><circle cx="78" cy="30" r="2"/><circle cx="150" cy="38" r="2.5"/><circle cx="34" cy="108" r="2"/><circle cx="226" cy="120" r="2"/></g><path d="M214 30 A26 26 0 1 0 234 76 A20 20 0 1 1 214 30 Z" fill="#fde68a"/><g stroke="#4a2511" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"><path d="M72 104 C40 106 28 78 42 56 C50 80 64 88 86 92 Z" fill="#fde8c0"/><path d="M184 104 C216 106 228 78 214 56 C206 80 192 88 170 92 Z" fill="#fde8c0"/><ellipse cx="128" cy="154" rx="68" ry="64" fill="#e8873a"/><g fill="#f2a04f" stroke-width="4"><circle cx="82" cy="104" r="17"/><circle cx="106" cy="94" r="17"/><circle cx="130" cy="90" r="17"/><circle cx="154" cy="94" r="17"/><circle cx="174" cy="104" r="17"/></g><ellipse cx="128" cy="184" rx="38" ry="28" fill="#f8cdb4"/><ellipse cx="116" cy="186" rx="5" ry="7" fill="#4a2511" stroke="none"/><ellipse cx="140" cy="186" rx="5" ry="7" fill="#4a2511" stroke="none"/><path d="M92 142 q12 11 24 0 M140 142 q12 11 24 0" fill="none" stroke-width="6"/><circle cx="86" cy="164" r="9" fill="#f472b6" stroke="none" opacity=".7"/><circle cx="170" cy="164" r="9" fill="#f472b6" stroke="none" opacity=".7"/><path d="M84 96 Q132 8 186 66 L178 92 Q132 66 92 96 Z" fill="#60a5fa"/><path d="M82 92 Q132 66 182 90 L180 104 Q132 80 84 106 Z" fill="#fff" stroke-width="4"/><circle cx="190" cy="58" r="11" fill="#fff" stroke-width="4"/></g><g fill="#fff" font-family="sans-serif" font-weight="bold"><text x="196" y="132" font-size="26">z</text><text x="214" y="112" font-size="20">z</text></g></svg>''',
+    "treeyagi": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fed7aa"/><stop offset="1" stop-color="#f97316"/></linearGradient></defs><rect width="256" height="256" rx="58" fill="url(#g)"/><g stroke="#14532d" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"><path d="M110 150 L106 226 L150 226 L146 150 Z" fill="#92400e" stroke="#451a03"/><circle cx="128" cy="92" r="52" fill="#22c55e"/><circle cx="82" cy="128" r="40" fill="#16a34a"/><circle cx="174" cy="128" r="40" fill="#16a34a"/><circle cx="128" cy="138" r="38" fill="#22c55e"/><path d="M104 70 q10 -14 26 -12" fill="none" stroke="#bbf7d0" stroke-width="7"/><g stroke="#000" fill="#111"><rect x="84" y="102" width="40" height="28" rx="12"/><rect x="132" y="102" width="40" height="28" rx="12"/><path d="M124 112 L132 112" fill="none"/></g><path d="M92 110 l10 0 M140 110 l10 0" stroke="#fff" stroke-width="5" fill="none"/><path d="M104 150 Q128 170 152 150" fill="none" stroke="#052e16" stroke-width="6"/><path d="M148 152 l8 -8" fill="none" stroke="#052e16" stroke-width="5"/></g></svg>''',
+    "trees-infamous-app": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4c1d95"/><stop offset="1" stop-color="#a855f7"/></linearGradient></defs><rect width="256" height="256" rx="58" fill="url(#g)"/><g stroke="#111827" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"><g transform="rotate(40 128 128)"><rect x="118" y="30" width="20" height="196" rx="9" fill="#cbd5e1"/><path d="M110 36 a26 26 0 1 1 36 0 l-8 14 l-20 0 Z" fill="#cbd5e1"/><path d="M122 18 L122 44 L134 44 L134 18" fill="#a855f7" stroke="none"/></g><path d="M112 160 L108 226 L148 226 L144 160 Z" fill="#92400e" stroke="#451a03"/><circle cx="128" cy="100" r="50" fill="#15803d"/><circle cx="84" cy="134" r="38" fill="#166534"/><circle cx="172" cy="134" r="38" fill="#166534"/><circle cx="128" cy="140" r="36" fill="#15803d"/><path d="M76 108 Q128 92 180 108 L176 136 Q154 140 142 126 Q128 118 114 126 Q102 140 80 136 Z" fill="#0b0b0f"/><ellipse cx="106" cy="120" rx="12" ry="9" fill="#fff" stroke="none"/><ellipse cx="150" cy="120" rx="12" ry="9" fill="#fff" stroke="none"/><circle cx="109" cy="121" r="5" fill="#111" stroke="none"/><circle cx="153" cy="121" r="5" fill="#111" stroke="none"/><path d="M108 158 Q128 172 148 158" fill="none" stroke="#052e16" stroke-width="6"/><path d="M126 164 l6 8" fill="none" stroke="#052e16" stroke-width="4"/></g></svg>''',
+    "soundlink-flex-usb-linux": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#99f6e4"/><stop offset="1" stop-color="#0891b2"/></linearGradient></defs><rect width="256" height="256" rx="58" fill="url(#g)"/><g transform="translate(128 126) scale(.9) translate(-134 -128)"><g stroke="#0f172a" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"><path d="M92 92 C92 56 164 56 164 92" fill="none" stroke="#ef4444" stroke-width="11"/><rect x="46" y="86" width="164" height="112" rx="46" fill="#1f2937"/><g fill="#374151" stroke="none"><circle cx="70" cy="112" r="3"/><circle cx="82" cy="104" r="3"/><circle cx="186" cy="112" r="3"/><circle cx="174" cy="104" r="3"/><circle cx="70" cy="172" r="3"/><circle cx="186" cy="172" r="3"/></g><circle cx="102" cy="130" r="19" fill="#fff"/><circle cx="154" cy="130" r="19" fill="#fff"/><circle cx="107" cy="134" r="8" fill="#111" stroke="none"/><circle cx="149" cy="127" r="8" fill="#111" stroke="none"/><ellipse cx="128" cy="170" rx="22" ry="15" fill="#7f1d1d"/><path d="M114 178 Q128 164 142 178" fill="#f87171" stroke="none"/><path d="M196 192 C230 196 234 220 214 226" fill="none" stroke="#0f172a" stroke-width="6"/><rect x="196" y="218" width="40" height="20" rx="4" fill="#cbd5e1" transform="rotate(-22 216 228)"/><rect x="226" y="222" width="10" height="4" fill="#0f172a" stroke="none" transform="rotate(-22 216 228)"/></g><g fill="#fff" font-family="sans-serif" font-weight="bold" opacity=".95"><text x="34" y="66" font-size="38">♪</text><text x="196" y="60" font-size="32">♫</text></g></g></svg>''',
+    "spare": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#bbf7d0"/><stop offset="1" stop-color="#16a34a"/></linearGradient></defs><rect width="256" height="256" rx="58" fill="url(#g)"/><g stroke="#831843" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"><circle cx="116" cy="50" r="24" fill="#fbbf24" stroke="#92400e"/><text x="116" y="60" font-size="30" font-family="sans-serif" font-weight="bold" text-anchor="middle" fill="#92400e" stroke="none">$</text><path d="M84 98 L96 70 L116 92 Z" fill="#f472b6"/><rect x="76" y="198" width="26" height="30" rx="8" fill="#f472b6"/><rect x="138" y="198" width="26" height="30" rx="8" fill="#f472b6"/><ellipse cx="124" cy="156" rx="76" ry="58" fill="#f9a8d4"/><path d="M52 146 C26 140 22 172 44 168" fill="none"/><ellipse cx="192" cy="160" rx="22" ry="18" fill="#f472b6"/><circle cx="186" cy="160" r="3.5" fill="#831843" stroke="none"/><circle cx="198" cy="160" r="3.5" fill="#831843" stroke="none"/><path d="M104 100 Q124 94 144 100" fill="none" stroke="#9d174d" stroke-width="6"/><circle cx="156" cy="130" r="18" fill="#fff"/><circle cx="160" cy="133" r="9" fill="#111" stroke="none"/><circle cx="156" cy="130" r="26" fill="none" stroke="#92400e" stroke-width="4"/><path d="M178 150 q10 30 -6 40" fill="none" stroke="#92400e" stroke-width="3"/><path d="M100 176 Q120 188 140 176" fill="none" stroke-width="5"/></g></svg>''',
+    "banana-manager-tools": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#d9f99d"/><stop offset="1" stop-color="#4ade80"/></linearGradient></defs><rect width="256" height="256" rx="58" fill="url(#g)"/><g transform="translate(128 136) scale(.86) translate(-128 -128)"><g stroke="#713f12" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"><path d="M94 34 C60 88 62 178 126 214 C160 232 206 218 222 190 C176 202 132 176 130 106 C130 74 134 54 138 34 Z" fill="#fde047"/><path d="M94 34 L138 34 L136 20 L98 20 Z" fill="#78350f"/><path d="M212 196 L224 188 L226 200 Z" fill="#78350f"/><path d="M104 60 C84 100 84 150 112 186" fill="none" stroke="#fffbeb" stroke-opacity=".7" stroke-width="7"/><g transform="rotate(-24 150 142)"><rect x="106" y="126" width="38" height="26" rx="11" fill="#111827"/><rect x="152" y="126" width="38" height="26" rx="11" fill="#111827"/><path d="M144 136 L152 136" fill="none"/><path d="M114 134 l9 0 M160 134 l9 0" stroke="#fff" stroke-width="5" fill="none"/></g><path d="M118 172 Q150 192 178 160" fill="none" stroke="#451a03" stroke-width="6"/></g><g transform="rotate(10 196 80)"><rect x="168" y="48" width="52" height="64" rx="7" fill="#fff" stroke="#334155" stroke-width="5"/><rect x="186" y="42" width="16" height="12" rx="3" fill="#94a3b8" stroke="#334155" stroke-width="4"/><g stroke="#16a34a" stroke-width="5" stroke-linecap="round" fill="none"><path d="M178 70 l6 6 l10 -12"/><path d="M178 92 l6 6 l10 -12"/></g></g></g></svg>''',
+    "adhd-frenzy": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ddd6fe"/><stop offset="1" stop-color="#7c3aed"/></linearGradient></defs><rect width="256" height="256" rx="58" fill="url(#g)"/><g stroke="#451a03" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"><path d="M170 214 C250 210 250 110 196 96 C226 120 214 176 160 184 Z" fill="#b45309"/><path d="M92 76 L84 34 L116 60 Z M164 76 L172 34 L140 60 Z" fill="#b45309"/><ellipse cx="128" cy="146" rx="62" ry="58" fill="#d97706"/><ellipse cx="128" cy="168" rx="32" ry="22" fill="#fde7c3"/><circle cx="86" cy="164" r="10" fill="#f9a8a8" stroke="none" opacity=".7"/><circle cx="170" cy="164" r="10" fill="#f9a8a8" stroke="none" opacity=".7"/><circle cx="104" cy="130" r="17" fill="#fff"/><circle cx="152" cy="130" r="17" fill="#fff"/><path d="M104 130 m0 0 c0 -5 6 -7 9 -3 c3 5 -4 10 -9 8 c-7 -3 -6 -13 3 -15 M152 130 c0 -5 6 -7 9 -3 c3 5 -4 10 -9 8 c-7 -3 -6 -13 3 -15" fill="none" stroke-width="3.5"/><path d="M120 164 L136 164 L135 190 L121 190 Z" fill="#fff" stroke-width="4"/><path d="M128 164 L128 189" fill="none" stroke-width="3"/><ellipse cx="128" cy="158" rx="9" ry="6" fill="#451a03" stroke="none"/><path d="M98 112 L112 106 M144 106 L160 112" fill="none" stroke-width="6"/></g><g fill="#fff" font-family="sans-serif" font-weight="bold" stroke="#5b21b6" stroke-width="2"><text x="30" y="70" font-size="40">!</text><text x="196" y="52" font-size="36">?</text><text x="38" y="206" font-size="34">!?</text></g><g fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity=".9"><path d="M22 100 l12 -10 l-10 -4 l12 -10"/><path d="M226 150 l-12 -8 l10 -6 l-10 -8"/></g></svg>''',
+    "mission-control": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0f172a"/><stop offset="1" stop-color="#1d4ed8"/></linearGradient></defs><rect width="256" height="256" rx="58" fill="url(#g)"/><g fill="#fff" opacity=".9"><circle cx="36" cy="44" r="2.5"/><circle cx="214" cy="34" r="2"/><circle cx="228" cy="110" r="2.5"/><circle cx="30" cy="196" r="2"/><circle cx="96" cy="26" r="2"/></g><g stroke="#3b1d0a" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"><path d="M72 112 C40 116 34 182 70 190 C86 160 84 134 84 118 Z" fill="#7c4a21"/><path d="M184 112 C216 116 222 182 186 190 C170 160 172 134 172 118 Z" fill="#7c4a21"/><ellipse cx="128" cy="140" rx="58" ry="56" fill="#d6a36a"/><ellipse cx="128" cy="170" rx="34" ry="26" fill="#f1d3ac"/><ellipse cx="128" cy="158" rx="13" ry="9" fill="#111" stroke="none"/><circle cx="124" cy="155" r="3" fill="#fff" stroke="none"/><path d="M128 166 L128 180 M112 184 Q128 196 144 184" fill="none" stroke-width="4"/><path d="M118 188 Q128 214 138 188 Z" fill="#fb7185" stroke-width="3"/><circle cx="104" cy="128" r="12" fill="#fff"/><circle cx="152" cy="128" r="12" fill="#fff"/><circle cx="106" cy="130" r="6" fill="#111" stroke="none"/><circle cx="150" cy="130" r="6" fill="#111" stroke="none"/><path d="M92 108 L116 114 M164 108 L140 114" fill="none" stroke-width="6"/><circle cx="128" cy="132" r="96" fill="#bae6fd" fill-opacity=".22" stroke="#e0f2fe" stroke-width="7"/><path d="M60 112 Q128 32 196 112" fill="none" stroke="#e5e7eb" stroke-width="9" opacity="0"/><rect x="76" y="212" width="104" height="14" rx="7" fill="#9ca3af" stroke="#334155"/><path d="M60 150 C52 100 78 78 100 80" fill="none" stroke="#f43f5e" stroke-width="8"/><rect x="48" y="146" width="18" height="26" rx="8" fill="#f43f5e"/><path d="M52 170 q-10 14 6 20" fill="none" stroke="#f43f5e" stroke-width="5"/></g><path d="M104 62 Q120 52 140 56" fill="none" stroke="#fff" stroke-opacity=".7" stroke-width="7" stroke-linecap="round"/></svg>''',
+    "grove": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#341a7a"/><stop offset="1" stop-color="#0a0722"/></linearGradient><linearGradient id="bark" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#8a5a2e"/><stop offset=".5" stop-color="#b07a42"/><stop offset="1" stop-color="#6a4120"/></linearGradient><linearGradient id="hat" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4a8af0"/><stop offset="1" stop-color="#2150b4"/></linearGradient><radialGradient id="glow" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#2fe0c0" stop-opacity=".45"/><stop offset="1" stop-color="#2fe0c0" stop-opacity="0"/></radialGradient><clipPath id="scarf"><rect x="83" y="162" width="90" height="21" rx="9"/></clipPath></defs><rect width="256" height="256" rx="58" fill="url(#sky)"/><circle cx="96" cy="50" r="1.2" fill="#fff" opacity="0.9"/><circle cx="26" cy="30" r="1.6" fill="#fff" opacity="0.5"/><circle cx="107" cy="26" r="1.6" fill="#fff" opacity="0.5"/><circle cx="23" cy="34" r="1.2" fill="#fff" opacity="0.7"/><circle cx="31" cy="73" r="0.9" fill="#fff" opacity="0.9"/><circle cx="122" cy="27" r="1.6" fill="#fff" opacity="0.5"/><circle cx="71" cy="27" r="1.6" fill="#fff" opacity="0.9"/><circle cx="115" cy="24" r="0.9" fill="#fff" opacity="0.5"/><circle cx="156" cy="46" r="1.2" fill="#fff" opacity="0.7"/><circle cx="50" cy="150" r="0.9" fill="#fff" opacity="0.9"/><circle cx="92" cy="58" r="0.9" fill="#fff" opacity="0.9"/><circle cx="160" cy="60" r="1.2" fill="#fff" opacity="0.5"/><circle cx="154" cy="28" r="1.6" fill="#fff" opacity="0.5"/><circle cx="172" cy="64" r="1.2" fill="#fff" opacity="0.9"/><circle cx="150" cy="121" r="1.2" fill="#fff" opacity="0.7"/><circle cx="163" cy="128" r="1.2" fill="#fff" opacity="0.7"/><circle cx="77" cy="58" r="1.6" fill="#fff" opacity="0.5"/><circle cx="34" cy="88" r="1.6" fill="#fff" opacity="0.7"/><circle cx="238" cy="99" r="1.6" fill="#fff" opacity="0.7"/><circle cx="87" cy="30" r="0.9" fill="#fff" opacity="0.9"/><circle cx="121" cy="54" r="1.2" fill="#fff" opacity="0.5"/><circle cx="139" cy="119" r="0.9" fill="#fff" opacity="0.9"/><circle cx="33" cy="92" r="1.2" fill="#fff" opacity="0.9"/><circle cx="103" cy="139" r="1.6" fill="#fff" opacity="0.7"/><circle cx="31" cy="35" r="1.2" fill="#fff" opacity="0.7"/><circle cx="192" cy="28" r="0.9" fill="#fff" opacity="0.9"/><circle cx="128" cy="130" r="110" fill="url(#glow)"/><!-- leafy hair poking out under the hat --><g><circle cx="66" cy="112" r="24" fill="#16a086"/><circle cx="84" cy="102" r="22" fill="#1fbf9f"/><circle cx="190" cy="112" r="24" fill="#16a086"/><circle cx="172" cy="102" r="22" fill="#1fbf9f"/><circle cx="56" cy="132" r="14" fill="#3ee0b5"/><circle cx="200" cy="132" r="14" fill="#3ee0b5"/></g><!-- roots --><g stroke="url(#bark)" stroke-width="11" stroke-linecap="round" fill="none"><path d="M84 222 Q62 232 50 244"/><path d="M172 222 Q194 232 206 244"/><path d="M128 224 L128 244"/></g><!-- trunk body --><path d="M94 104 C90 150 82 192 64 228 L192 228 C174 192 166 150 162 104 Z" fill="url(#bark)"/><path d="M112 190 Q118 205 112 222 M144 186 Q140 204 148 222" stroke="#6a4120" stroke-width="3" fill="none" stroke-linecap="round" opacity=".6"/><!-- arms --><path d="M96 150 Q76 160 66 176" stroke="url(#bark)" stroke-width="10" fill="none" stroke-linecap="round"/><circle cx="64" cy="180" r="9" fill="#3ee0b5"/><path d="M160 152 Q184 156 202 170" stroke="url(#bark)" stroke-width="10" fill="none" stroke-linecap="round"/><!-- staff --><line x1="208" y1="92" x2="203" y2="240" stroke="#7c4d22" stroke-width="8" stroke-linecap="round"/><path d="M208 92 C192 92 192 68 208 68 C220 68 221 84 211 86" stroke="#9a6430" stroke-width="6" fill="none" stroke-linecap="round"/><circle cx="204" cy="172" r="9" fill="#a8713b"/><!-- face --><ellipse cx="112" cy="134" rx="11" ry="12" fill="#fff"/><ellipse cx="144" cy="134" rx="11" ry="12" fill="#fff"/><circle cx="113" cy="136" r="5.5" fill="#1b1140"/><circle cx="145" cy="136" r="5.5" fill="#1b1140"/><circle cx="115" cy="133.5" r="1.8" fill="#fff"/><circle cx="147" cy="133.5" r="1.8" fill="#fff"/><path d="M100 118 Q112 111 123 118 M133 118 Q144 111 156 118" stroke="#4a2a10" stroke-width="3.5" fill="none" stroke-linecap="round"/><ellipse cx="128" cy="146" rx="5" ry="4" fill="#7c4d22"/><path d="M117 153 Q128 164 139 153" stroke="#3a1a12" stroke-width="3.5" fill="none" stroke-linecap="round"/><!-- checkered scarf --><g clip-path="url(#scarf)"><rect x="84.0" y="163" width="9.5" height="10" fill="#18b8b0"/><rect x="93.5" y="163" width="9.5" height="10" fill="#7b45cf"/><rect x="103.0" y="163" width="9.5" height="10" fill="#18b8b0"/><rect x="112.5" y="163" width="9.5" height="10" fill="#7b45cf"/><rect x="122.0" y="163" width="9.5" height="10" fill="#18b8b0"/><rect x="131.5" y="163" width="9.5" height="10" fill="#7b45cf"/><rect x="141.0" y="163" width="9.5" height="10" fill="#18b8b0"/><rect x="150.5" y="163" width="9.5" height="10" fill="#7b45cf"/><rect x="160.0" y="163" width="9.5" height="10" fill="#18b8b0"/><rect x="84.0" y="173" width="9.5" height="10" fill="#7b45cf"/><rect x="93.5" y="173" width="9.5" height="10" fill="#18b8b0"/><rect x="103.0" y="173" width="9.5" height="10" fill="#7b45cf"/><rect x="112.5" y="173" width="9.5" height="10" fill="#18b8b0"/><rect x="122.0" y="173" width="9.5" height="10" fill="#7b45cf"/><rect x="131.5" y="173" width="9.5" height="10" fill="#18b8b0"/><rect x="141.0" y="173" width="9.5" height="10" fill="#7b45cf"/><rect x="150.5" y="173" width="9.5" height="10" fill="#18b8b0"/><rect x="160.0" y="173" width="9.5" height="10" fill="#7b45cf"/></g><!-- wizard hat --><ellipse cx="128" cy="98" rx="70" ry="15" fill="#2a58bd"/><path d="M154 12 C143 44 116 72 78 96 L180 96 C168 68 160 40 154 12 Z" fill="url(#hat)"/><path d="M154 12 C165 14 172 20 170 28 C166 22 160 18 154 12 Z" fill="#4a8af0"/><path d="M77 90 Q128 108 181 90 L183 99 Q128 117 75 99 Z" fill="#7b45cf"/><polygon points="130.0,61.0 132.4,66.7 138.6,67.2 133.9,71.3 135.3,77.3 130.0,74.0 124.7,77.3 126.1,71.3 121.4,67.2 127.6,66.7" fill="#ffd23f"/><polygon points="158.0,41.5 159.7,45.6 164.2,46.0 160.8,48.9 161.8,53.3 158.0,50.9 154.2,53.3 155.2,48.9 151.8,46.0 156.3,45.6" fill="#ffd23f"/><polygon points="112.0,85.0 113.3,88.2 116.8,88.5 114.1,90.7 114.9,94.0 112.0,92.2 109.1,94.0 109.9,90.7 107.2,88.5 110.7,88.2" fill="#ffd23f"/><polygon points="150.0,75.5 151.2,78.4 154.3,78.6 151.9,80.6 152.6,83.6 150.0,82.0 147.4,83.6 148.1,80.6 145.7,78.6 148.8,78.4" fill="#ffd23f"/></svg>''',
+}
+ICON_DIR_USER = os.path.join(GLib.get_user_config_dir(), "grove", "icons")
+ICON_CACHE = os.path.join(GLib.get_user_cache_dir(), "grove", "icons")
+
+
+def find_icon(d):
+    """Path to the best icon file for a project, or None: yours, the project's own, then the built-in one."""
+    name = d["name"].lower()
+    for ext in (".svg", ".png"):
+        p = os.path.join(ICON_DIR_USER, name + ext)
+        if os.path.isfile(p):
+            return p
+    own = project_icon(d)
+    if own:
+        return own
+    svg = BUILTIN_ICONS.get(name)
+    if not svg:
+        return None
+    p = os.path.join(ICON_CACHE, f"{name}-{zlib.crc32(svg.encode()):08x}.svg")
+    if not os.path.exists(p):
+        try:
+            os.makedirs(ICON_CACHE, exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(svg)
+        except OSError:
+            return None
+    return p
 
 
 class App(Adw.Application):
