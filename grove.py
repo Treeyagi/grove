@@ -1087,15 +1087,20 @@ class Grove(Adw.ApplicationWindow):
         else:
             where = "No repository or folder set yet: open \"Edit details and commands\" below."
         launch.add(Gtk.Label(label=where, xalign=0, wrap=True, css_classes=["dim-label"], margin_bottom=8))
+        if here:
+            self.fill_missing(d)
         if d.get("site") and not here and not d.get("run"):
             icon, label, tip = "web-browser-symbolic", "Open website", "Opens the live site in your browser"
+        elif here and d.get("install") and not d.get("run"):   # something to set up, nothing to start (a wallpaper pack, say)
+            icon, label, tip = "system-software-install-symbolic", "Install", "Run its install step"
         elif here:
             icon, label, tip = "media-playback-start-symbolic", "Open", "Start it (in a terminal window when it needs one)"
         else:
             icon, label, tip = "system-software-install-symbolic", "Install & open", "Download it, set it up, then start it"
+        label_main = label
         main = Gtk.Button(child=Adw.ButtonContent(icon_name=icon, label=self.T(label)),
                           css_classes=["suggested-action", "pill"], tooltip_text=tip, halign=Gtk.Align.START)
-        main.connect("clicked", lambda b: self.run_project(d, b))
+        main.connect("clicked", lambda b: (self.install if label == "Install" else self.run_project)(d, b))
         launch.add(main)
         newer = self.latest_tags.get(d["id"])
         if newer and d.get("release") and newer["tag"] != d["release"]["tag"]:
@@ -1124,6 +1129,8 @@ class Grove(Adw.ApplicationWindow):
                            tooltip_text=tip if here or not needs_folder else "Get it first: use the big button above")
             b.set_sensitive(here or not needs_folder)
             b.connect("clicked", fn)
+            if label.startswith("Install") and label_main == "Install":
+                continue   # the big button already does this
             flow.append(b)
         more.add(flow)
         page.add(more)
