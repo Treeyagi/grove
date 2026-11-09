@@ -72,4 +72,3 @@ opens them with one big button. GitHub: Treeyagi/grove (public). Desktop first; 
 - `desktop-buddy`: release = `tools/make-executable.sh` -> `dist/desktop-buddy.tar.gz`, tag `vX.Y.Z`, `gh release create` with it and `tools/install-deps.sh`.
 - `Medllm`: `packaging/make-setup.sh` builds `medllm-lab-setup.tar.gz` from `dist/medllm-lab`.
 - `cachyos-live-wallpapers`: root `install.sh` is a chooser; the `collection-*` release holds all wallpapers.
-- Leftover: the public pre-release `backgrounds-v1` on this repo holds old video files nothing uses. Delete only if the user says so.
