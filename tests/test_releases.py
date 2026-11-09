@@ -36,7 +36,7 @@ check("AppImage first", pick(names), names[0])
 check("then the Linux tarball", pick(names[1:]), names[1])
 check("nothing usable", pick(names[2:]), None)
 check("rest json", g.parse_release('{"tag_name":"v2","assets":[{"name":"b","browser_download_url":"x"}]}'),
-      {"tag": "v2", "assets": [{"name": "b", "url": "x"}]})
+      {"tag": "v2", "assets": [{"name": "b", "api": "", "url": "x"}]})
 check("rest json: download link, not the API url",
       g.parse_release('{"tag_name":"v2","assets":[{"name":"b","url":"api","browser_download_url":"dl"}]}')["assets"][0]["url"], "dl")
 check("not json", g.parse_release("nope"), None)
@@ -144,6 +144,24 @@ check("update: a page that isn't Grove is refused", g.update_available("print(1)
 g.write_update("class Grove: pass\nX = 1\n", cur)
 check("update: written and runnable", (open(cur).read(), os.access(cur, os.X_OK), os.listdir(d)),
       ("class Grove: pass\nX = 1\n", True, ["grove.py"]))
+
+# sharing with a token
+fake = "github_pat_" + "A1b2C3d4E5f6G7h8I9j0K1"
+check("token: fine-grained format ok", g.looks_like_token(fake), True)
+check("token: classic format ok", g.looks_like_token("ghp_" + "a" * 36), True)
+check("token: junk refused", (g.looks_like_token("hello"), g.looks_like_token(""), g.looks_like_token(fake + " extra")), (False, False, False))
+d = tempfile.mkdtemp()
+p = g.write_curl_auth(fake, os.path.join(d, "sub", "curl-auth"))
+check("token: curl config is private and holds the header",
+      (oct(os.stat(p).st_mode & 0o777), open(p).read()), ("0o600", f'header = "Authorization: Bearer {fake}"\n'))
+check("token: summary", g.summarize_token('{"login":"treeyagi"}', '[{"full_name":"treeyagi/a","private":true},{"full_name":"treeyagi/b","private":false}]'),
+      {"login": "treeyagi", "repos": ["treeyagi/a", "treeyagi/b"], "private": 1})
+check("token: bad answer gives None", g.summarize_token("nope", "[]"), None)
+rel = g.parse_release('{"tagName":"v1","assets":[{"name":"a.zip","url":"https://github.com/o/r/releases/download/v1/a.zip","apiUrl":"https://api.github.com/repos/o/r/releases/assets/9"}]}')
+check("release: gh json keeps the API url for private repos", rel["assets"][0]["api"], "https://api.github.com/repos/o/r/releases/assets/9")
+rel = g.parse_release('{"tag_name":"v1","assets":[{"name":"a.zip","url":"https://api.github.com/repos/o/r/releases/assets/9","browser_download_url":"https://github.com/o/r/releases/download/v1/a.zip"}]}')
+check("release: REST json too", (rel["assets"][0]["api"], rel["assets"][0]["url"]),
+      ("https://api.github.com/repos/o/r/releases/assets/9", "https://github.com/o/r/releases/download/v1/a.zip"))
 
 print("\nALL OK" if not failed else f"\nFAILED: {failed}")
 sys.exit(1 if failed else 0)

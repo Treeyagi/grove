@@ -217,6 +217,45 @@ def pick_asset(assets):
     return ranked[0][1] if ranked and ranked[0][0] > 0 else None
 
 
+# ---- sharing private repos with a token ------------------------------------------------------------------
+TOKEN_RE = re.compile(r"github_pat_[A-Za-z0-9_]{22,}|gh[pousr]_[A-Za-z0-9]{30,}")
+AUTH_FILE = os.path.join(GLib.get_user_config_dir(), "grove", "curl-auth")   # curl reads the token from here, so it never shows in `ps`
+TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
+TOKEN_LIST_URL = "https://github.com/settings/personal-access-tokens"
+INSTALL_LINE = "curl -fsSL https://raw.githubusercontent.com/Treeyagi/grove/main/install.sh | sh"
+
+
+def looks_like_token(text):
+    return bool(TOKEN_RE.fullmatch((text or "").strip()))
+
+
+def write_curl_auth(token, path=AUTH_FILE):
+    """A curl config holding the Authorization header, readable only by this user. Returns its path."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(f'header = "Authorization: Bearer {token}"\n')
+    os.chmod(path, 0o600)
+    return path
+
+
+def summarize_token(user_json, repos_json):
+    """What a token can do, from GitHub's /user and /user/repos answers: {login, repos:[owner/name], private:n} or None."""
+    try:
+        user, repos = json.loads(user_json), json.loads(repos_json)
+        return {"login": user["login"], "repos": [r["full_name"] for r in repos],
+                "private": sum(1 for r in repos if r.get("private"))}
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def rest_repo(r):
+    """A repo from GitHub's REST API, shaped like `gh repo list --json` output."""
+    return {"name": r["name"], "url": r["html_url"], "description": r["description"], "isPrivate": r["private"],
+            "isArchived": r["archived"], "primaryLanguage": {"name": r["language"]} if r["language"] else None,
+            "updatedAt": r["pushed_at"] or r["updated_at"]}
+
+
 def parse_release(text):
     """Normalise `gh release view --json` or the REST API's JSON into {tag, assets:[{name,url}]}, or None."""
     try:
@@ -226,8 +265,11 @@ def parse_release(text):
     tag = r.get("tagName") or r.get("tag_name")
     if not tag:
         return None
-    assets = [{"name": a.get("name", ""), "url": a.get("browser_download_url") or a.get("url", "")}   # the REST API's "url" is metadata, not the file
-              for a in r.get("assets", [])]
+    assets = []
+    for a in r.get("assets", []):
+        api = a.get("apiUrl") or (a.get("url", "") if "/releases/assets/" in a.get("url", "") else "")   # private repos only serve files through this
+        assets.append({"name": a.get("name", ""), "api": api,
+                       "url": a.get("browser_download_url") or a.get("url", "")})   # the REST API's "url" is metadata, not the file
     return {"tag": tag, "assets": assets}
 
 
@@ -629,12 +671,16 @@ class Grove(Adw.ApplicationWindow):
         menu.append("Re-read all READMEs", "win.readmes")
         menu.append("Bring back removed repos", "win.restore")
         menu.append("Hackers theme", "win.hackers")
+        menu.append("Share a private repo…", "win.share")
         menu.append("Update Grove", "win.update")
         menu.append("Settings", "win.settings")
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu))
         act = Gio.SimpleAction.new("settings", None)
         act.connect("activate", lambda *_: self.show_settings())
         self.add_action(act)
+        share = Gio.SimpleAction.new("share", None)
+        share.connect("activate", lambda *_: self.show_share_wizard())
+        self.add_action(share)
         upd = Gio.SimpleAction.new("update", None)
         upd.connect("activate", lambda *_: self.update_self())
         self.add_action(upd)
@@ -755,7 +801,7 @@ class Grove(Adw.ApplicationWindow):
         self.data["expanded"] = sorted(self.expanded)
         os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
         tmp = CONFIG + ".tmp"
-        with open(tmp, "w") as f:
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:   # it may hold a token
             json.dump(self.data, f, indent=2)
         os.replace(tmp, CONFIG)
 
@@ -1173,7 +1219,7 @@ class Grove(Adw.ApplicationWindow):
                 else:  # a public repo that 404s has no README; a private one is unknown
                     finish("" if not d.get("private") and "404" in (err or "") else None)
             self.run_async(["curl", "-fsSL", "-H", "Accept: application/vnd.github.raw+json",
-                            f"https://api.github.com/repos/{slug}/readme"], done)
+                            f"https://api.github.com/repos/{slug}/readme"], done, slug=slug)
 
         if not shutil.which("gh"):
             public_api()
@@ -1186,7 +1232,7 @@ class Grove(Adw.ApplicationWindow):
                 finish("")
             else:
                 public_api()
-        self.run_async(["gh", "api", f"repos/{slug}/readme", "--jq", ".content"], done)
+        self.run_async(["gh", "api", f"repos/{slug}/readme", "--jq", ".content"], done, slug=slug)
 
     def refetch(self, d):
         self.readmes.pop(d["id"], None)
@@ -1541,11 +1587,33 @@ class Grove(Adw.ApplicationWindow):
         dlg.select_folder(self, None, done)
 
     # ---- github ------------------------------------------------------
-    def run_async(self, argv, cb):
+    def token_covers(self, slug):
+        """Does the saved token belong to this repo's owner? (Only then it is sent; your own repos use your own login.)"""
+        owner = (self.settings.get("token_owner") or "").lower()
+        return bool(self.settings.get("token") and owner and slug and slug.split("/")[0].lower() == owner)
+
+    def run_async(self, argv, cb, slug=None, token=False):
+        """Run a command and call cb(proc, out, err). slug: the repo it is about, so the saved token is used when
+        it belongs to that repo's owner; token=True forces it. The token goes in the environment or a 0600 curl
+        config, never in the command line."""
+        tok = self.settings.get("token", "")
+        use = bool(tok) and (token or self.token_covers(slug))
         try:
-            proc = Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE)
-        except GLib.Error as e:
-            self.toast(f"Could not run {argv[0]}: {e.message}")
+            flags = Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
+            if use:
+                launcher = Gio.SubprocessLauncher.new(flags)
+                basic = base64.b64encode(f"x-access-token:{tok}".encode()).decode()
+                for k, v in (("GH_TOKEN", tok), ("GIT_CONFIG_COUNT", "1"),
+                             ("GIT_CONFIG_KEY_0", "http.https://github.com/.extraheader"),
+                             ("GIT_CONFIG_VALUE_0", f"Authorization: Basic {basic}")):
+                    launcher.setenv(k, v, True)
+                if argv[0] == "curl":
+                    argv = ["curl", "-K", write_curl_auth(tok)] + argv[1:]
+                proc = launcher.spawnv(argv)
+            else:
+                proc = Gio.Subprocess.new(argv, flags)
+        except (GLib.Error, OSError) as e:
+            self.toast(f"Could not run {argv[0]}: {getattr(e, 'message', e)}")
             return
         proc.communicate_utf8_async(None, None, lambda p, r: cb(p, *p.communicate_utf8_finish(r)[1:]))
 
@@ -1585,7 +1653,7 @@ class Grove(Adw.ApplicationWindow):
         if not shutil.which("gh"):
             self.finish_sync()
             return
-        argv = ["gh", "repo", "list", "--limit", "500", "--json", self.REPO_FIELDS]
+        argv = ["gh", "repo", "list", "--limit", "500", "--json", self.REPO_FIELDS]   # always your own login, never the shared token
         if self.settings.get("public_only"):
             argv += ["--visibility", "public"]
 
@@ -1623,7 +1691,40 @@ class Grove(Adw.ApplicationWindow):
                 then()
         page(1)
 
+    def sync_shared(self, then):
+        """Repos the saved token can see (the ones somebody shared with you), grouped by owner."""
+        if not self.settings.get("token"):
+            then()
+            return
+        repos = []
+
+        def page(n):
+            url = ("https://api.github.com/user/repos?per_page=100&sort=updated"
+                   f"&affiliation=owner,collaborator,organization_member&page={n}")
+            self.run_async(["curl", "-fsSL", "-H", "Accept: application/vnd.github+json", url],
+                           lambda proc, out, err: got(n, proc, out), token=True)
+
+        def got(n, proc, out):
+            if proc.get_exit_status() != 0:
+                if not self._quiet:
+                    self.toast("The shared token didn't work (expired or removed?): Menu > Share a private repo")
+                then()
+                return
+            batch = json.loads(out)
+            repos.extend(batch)
+            if len(batch) == 100 and n < 5:
+                page(n + 1)
+                return
+            for owner in dict.fromkeys(r["owner"]["login"] for r in repos):
+                self._added += self._import([rest_repo(r) for r in repos if r["owner"]["login"] == owner], owner,
+                                            pinned=owner.lower() == FEATURED.lower())
+            then()
+        page(1)
+
     def finish_sync(self):
+        self.sync_shared(self._finish_sync)
+
+    def _finish_sync(self):
         self.data["last_sync"] = time.time()
         self.rebuild()
         self.prefetch_readmes()
@@ -1706,7 +1807,7 @@ class Grove(Adw.ApplicationWindow):
         else:
             argv = ["curl", "-fsSL", "-H", "Accept: application/vnd.github+json",
                     f"https://api.github.com/repos/{slug}/releases/latest"]
-        self.run_async(argv, lambda proc, out, _e: cb(parse_release(out) if proc.get_exit_status() == 0 else None))
+        self.run_async(argv, lambda proc, out, _e: cb(parse_release(out) if proc.get_exit_status() == 0 else None), slug=slug)
 
     def _acquire(self, d, button, rel, then):
         if not rel:
@@ -1728,7 +1829,9 @@ class Grove(Adw.ApplicationWindow):
             argv = ["gh", "release", "download", rel["tag"], "--repo", slug, "--pattern", asset["name"],
                     "--dir", tmp, "--clobber"]
         else:
-            argv = ["curl", "-fL", "-o", out, asset["url"]]
+            private_file = self.token_covers(slug) and asset.get("api")   # a private repo's file comes from the API, not the public link
+            argv = (["curl", "-fL", "-H", "Accept: application/octet-stream", "-o", out, asset["api"]] if private_file
+                    else ["curl", "-fL", "-o", out, asset["url"]])
 
         def done(proc, _o, err):
             ok = proc.get_exit_status() == 0 and os.path.exists(out)
@@ -1748,7 +1851,7 @@ class Grove(Adw.ApplicationWindow):
                 self.toast(f"Couldn't unpack it: {e}")
             shutil.rmtree(tmp, ignore_errors=True)
             cb(ok)
-        self.run_async(argv, done)
+        self.run_async(argv, done, slug=slug)
 
     def _acquired(self, d, button, ok, then):
         if ok:
@@ -1778,7 +1881,7 @@ class Grove(Adw.ApplicationWindow):
             self.rebuild(d["id"])
             if then and proc.get_exit_status() == 0:
                 then()
-        self.run_async(argv, done)
+        self.run_async(argv, done, slug=repo_slug(d["url"]))
 
     # ---- updates ---------------------------------------------------------
     def check_update(self, d):
@@ -1818,8 +1921,9 @@ class Grove(Adw.ApplicationWindow):
                 self.toast(lines[-1] if lines else "Update failed (uncommitted changes?)")
             self.save()
             self.rebuild(d["id"])
+        slug = repo_slug(d["url"])
         self.run_async(["git", "-C", path, "fetch", "--tags", "--force", "--quiet"],
-                       lambda p, _o, _e: self.run_async(["git", "-C", path, "checkout", "-q", rel["tag"]], checked_out))
+                       lambda p, _o, _e: self.run_async(["git", "-C", path, "checkout", "-q", rel["tag"]], checked_out), slug=slug)
 
     def _updated(self, d, rel, ok):
         if ok:
@@ -1829,6 +1933,185 @@ class Grove(Adw.ApplicationWindow):
         self.rebuild(d["id"])
 
     # ---- settings ----------------------------------------------------
+    # ---- sharing a private repo (wizard) -----------------------------------
+    def check_token(self, token, cb):
+        """cb(summary or None, error text): what this token can see on GitHub, without saving it."""
+        fd, cfg = tempfile.mkstemp(prefix="grove-auth-")
+        os.close(fd)
+        write_curl_auth(token, cfg)
+
+        def finish(summary, err):
+            try:
+                os.remove(cfg)
+            except OSError:
+                pass
+            cb(summary, err)
+
+        def fail(err):
+            finish(None, "GitHub says that token is wrong or has expired." if "401" in (err or "")
+                   else "Couldn't reach GitHub with that token.")
+
+        def got_user(proc, user, err):
+            if proc.get_exit_status() != 0:
+                return fail(err)
+            self.run_async(["curl", "-fsS", "-K", cfg, "-H", "Accept: application/vnd.github+json",
+                            "https://api.github.com/user/repos?per_page=100&affiliation=owner,collaborator,organization_member"],
+                           lambda p, repos, e: finish(summarize_token(user, repos), "Couldn't read GitHub's answer.")
+                           if p.get_exit_status() == 0 else fail(e))
+        self.run_async(["curl", "-fsS", "-K", cfg, "-H", "Accept: application/vnd.github+json",
+                        "https://api.github.com/user"], got_user)
+
+    def show_share_wizard(self):
+        dlg = Adw.Dialog(title="Share a private repo", content_width=520, content_height=620)
+        nav = Adw.NavigationView()
+        dlg.set_child(nav)
+
+        def page(title, blurb, steps=(), widgets=(), buttons=()):
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=18, margin_bottom=18,
+                          margin_start=18, margin_end=18)
+            if blurb:
+                box.append(Gtk.Label(label=blurb, wrap=True, xalign=0))
+            for i, t in enumerate(steps, 1):
+                box.append(Gtk.Label(label=f"{i}.  {t}", wrap=True, xalign=0))
+            for w in widgets:
+                box.append(w)
+            row = Gtk.Box(spacing=8, halign=Gtk.Align.END, margin_top=6)
+            for label, fn, suggested in buttons:
+                b = Gtk.Button(label=label, css_classes=["suggested-action"] if suggested else [])
+                b.connect("clicked", lambda *_, fn=fn: fn())
+                row.append(b)
+            box.append(row)
+            tv = Adw.ToolbarView(content=Gtk.ScrolledWindow(child=box, vexpand=True))
+            tv.add_top_bar(Adw.HeaderBar())
+            return Adw.NavigationPage(title=title, child=tv)
+
+        def status():
+            return Gtk.Label(label="", wrap=True, xalign=0, selectable=True)
+
+        def token_row():
+            lst = Gtk.ListBox(css_classes=["boxed-list"], selection_mode=Gtk.SelectionMode.NONE)
+            row = Adw.PasswordEntryRow(title="Paste the token here")
+            lst.append(row)
+            return lst, row
+
+        def describe(summary):
+            names = ", ".join(summary["repos"][:12]) + (" …" if len(summary["repos"]) > 12 else "")
+            return (f"Works. This token belongs to {summary['login']} and can see {len(summary['repos'])} repo"
+                    f"{'s' if len(summary['repos']) != 1 else ''} ({summary['private']} private): {names}")
+
+        def copy(text, what):
+            self.get_clipboard().set(text)
+            self.toast(f"Copied {what}")
+
+        # ---- the person sharing
+        def owner_start():
+            nav.push(page("Make a token",
+                          "A token is a password that only lets someone READ the repos you pick. You can switch it off at any time.",
+                          steps=["Click \"Open GitHub\" below. Sign in if it asks.",
+                                 "Token name: anything, like \"Grove for my brother\".",
+                                 "Expiration: pick how long he gets access (you can renew it later).",
+                                 "Repository access: choose \"Only select repositories\", then pick just the repos to share.",
+                                 "Permissions: open \"Repository permissions\" and set \"Contents\" to \"Read-only\". Leave everything else alone.",
+                                 "Click \"Generate token\", then copy it. It starts with github_pat_ and GitHub shows it only once."],
+                          buttons=[("Open GitHub", lambda: self.report(spawn(["xdg-open", TOKEN_URL])), False),
+                                   ("I have the token", owner_check, True)]))
+
+        def owner_check():
+            lst, row = token_row()
+            out = status()
+
+            def test():
+                tok = row.get_text().strip()
+                if not looks_like_token(tok):
+                    out.set_label("That doesn't look like a GitHub token (it should start with github_pat_).")
+                    return
+                out.set_label("Checking…")
+                self.check_token(tok, lambda summ, err: out.set_label(describe(summ) if summ else err))
+            nav.push(page("Check it (optional)",
+                          "Paste the token to see which repos it opens. Grove does not save it: close this window when you're done "
+                          "and it is forgotten. If the list is wrong, go back and make a new token.",
+                          widgets=[lst, out],
+                          buttons=[("Check", test, False), ("Next: send it", owner_send, True)]))
+
+        def owner_send():
+            note = ("Hi! I shared some of my private repos with you through Grove.\n"
+                    f"1. Install Grove: {INSTALL_LINE}\n"
+                    "2. Open Grove, click the menu (top right) > \"Share a private repo…\" > \"I was sent a token\".\n"
+                    "3. Paste the token I'm sending you separately, press Save, and my repos show up in the tree.")
+            nav.push(page("Send it to him safely",
+                          "The token is a password, so treat it like one.",
+                          steps=["Send the token in a private message (Signal, WhatsApp, iMessage), not in email, a public chat, a screenshot, or a repo.",
+                                 "Send the how-to below as a separate message so the token isn't sitting next to instructions.",
+                                 "When he's done with it, or if it leaks, delete the token at GitHub (button below). That cuts off his access at once."],
+                          buttons=[("Copy the how-to", lambda: copy(note, "the how-to for him"), True),
+                                   ("Manage my tokens", lambda: self.report(spawn(["xdg-open", TOKEN_LIST_URL])), False),
+                                   ("Done", dlg.close, False)]))
+
+        # ---- the person getting the token
+        def receiver_start():
+            lst, row = token_row()
+            out = status()
+            busy = {"on": False}
+
+            def save():
+                tok = row.get_text().strip()
+                if busy["on"]:
+                    return
+                if not looks_like_token(tok):
+                    out.set_label("That doesn't look like a GitHub token (it should start with github_pat_). Copy the whole thing.")
+                    return
+                busy["on"] = True
+                out.set_label("Checking the token…")
+
+                def checked(summ, err):
+                    busy["on"] = False
+                    if not summ:
+                        out.set_label(err)
+                        return
+                    self.settings["token"], self.settings["token_owner"] = tok, summ["login"]
+                    write_curl_auth(tok)
+                    self.save()
+                    row.set_text("")
+                    out.set_label(describe(summ))
+                    self.sync()
+                    nav.push(page("All set",
+                                  f"Saved. Grove is fetching the repos shared by {summ['login']}; they appear in the tree under "
+                                  f"\"{summ['login']}\" (private ones are marked). Install and Run work on them like any other repo.",
+                                  buttons=[("Close", dlg.close, True)]))
+                self.check_token(tok, checked)
+            nav.push(page("Paste the token",
+                          "Paste the token you were sent. Grove checks it with GitHub, then keeps it in a file only you can read. "
+                          "It is only ever sent to GitHub, and only for the repos of the person who shared with you.",
+                          widgets=[lst, out], buttons=[("Check and save", save, True)]))
+
+        def remove_token():
+            self.settings.pop("token", None)
+            self.settings.pop("token_owner", None)
+            try:
+                os.remove(AUTH_FILE)
+            except OSError:
+                pass
+            self.save()
+            self.toast("Token removed")
+            dlg.close()
+
+        # ---- first page
+        owner_btn = Gtk.Button(label="I want to share a private repo", css_classes=["suggested-action", "pill"])
+        owner_btn.connect("clicked", lambda *_: owner_start())
+        recv_btn = Gtk.Button(label="I was sent a token", css_classes=["pill"])
+        recv_btn.connect("clicked", lambda *_: receiver_start())
+        widgets = [owner_btn, recv_btn]
+        if self.settings.get("token"):
+            have = Gtk.Label(label=f"A token from {self.settings.get('token_owner', 'someone')} is saved on this computer.",
+                             wrap=True, xalign=0)
+            rm = Gtk.Button(label="Remove the saved token", css_classes=["destructive-action"])
+            rm.connect("clicked", lambda *_: remove_token())
+            widgets += [have, rm]
+        nav.push(page("Share a private repo",
+                      "GitHub keeps private repos private. A token lets one person open just the repos you choose, without "
+                      "adding them to your GitHub account. Which are you?", widgets=widgets))
+        dlg.present(self)
+
     def show_settings(self):
         s = self.settings
         lst = Gtk.ListBox(css_classes=["boxed-list"], selection_mode=Gtk.SelectionMode.NONE)

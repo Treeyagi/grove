@@ -63,3 +63,15 @@ Options go after `sh -s --`, for example `... | sh -s -- --no-launch` or `... | 
 - Your list lives in `~/.config/grove` on your own computer; nothing is uploaded anywhere.
 
 Run without installing: `python3 grove.py`
+
+## Sharing a private repo
+
+Menu > **Share a private repo…** opens a two-sided wizard.
+
+- **I want to share:** it walks you through making a read-only, expiring GitHub token (fine-grained, "Contents: read-only",
+  only the repos you pick), lets you check which repos it opens, and gives you a how-to message to send with it.
+- **I was sent a token:** paste it, Grove checks it with GitHub and saves it in a file only you can read
+  (`~/.config/grove/`). The shared repos then show up in the tree under the owner's name, and Install, Run and
+  release downloads work on them. The token is only sent to GitHub, and only for the repos of the person who shared it;
+  your own `gh` login is used for everything else. Remove it any time from the same wizard, or revoke it on GitHub.
+
