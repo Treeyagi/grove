@@ -66,5 +66,29 @@ with tempfile.TemporaryDirectory() as tmp:
     open(script, "w").write("#!/bin/sh\necho hi\n")
     check("no --uninstall means none", g.own_uninstall(proj, "./go.sh"), "")
 
+
+# ---- which uninstall command is found, and whether it needs a terminal ----
+with tempfile.TemporaryDirectory() as tmp:
+    def put(name, text, mode=0o755):
+        f = os.path.join(tmp, name)
+        open(f, "w").write(text)
+        os.chmod(f, mode)
+    check("nothing to run -> nothing found", g.own_uninstall(tmp, "./go.sh"), "")
+    put("install.sh", "#!/bin/sh\n# ./install.sh --uninstall removes it\n")
+    check("install.sh --uninstall is found", g.own_uninstall(tmp, ""), "./install.sh --uninstall")
+    put("uninstall.sh", "#!/bin/sh\necho bye\n")
+    check("uninstall.sh beats install.sh", g.own_uninstall(tmp, ""), "./uninstall.sh")
+    put("go.sh", "#!/bin/sh\n# --uninstall: undo\n")
+    check("the run program's --uninstall beats both", g.own_uninstall(tmp, "./go.sh"), "./go.sh --uninstall")
+    put("uninstall.sh", "#!/bin/sh\necho bye\n", 0o644)
+    check("a non-executable uninstall.sh is not run", g.own_uninstall(tmp, ""), "./install.sh --uninstall")
+    put("uninstall.sh", "#!/bin/sh\nsudo bash ./uninstall-system.sh\n")
+    check("sudo means it needs a terminal", g.uninstall_needs_terminal(tmp, "./uninstall.sh"), True)
+    put("uninstall.sh", "#!/bin/sh\nrm -f ~/.local/share/applications/x.desktop\n")
+    check("plain removal does not", g.uninstall_needs_terminal(tmp, "./uninstall.sh"), False)
+    put("uninstall.sh", "#!/bin/sh\nread -r -p 'sure? ' a\n")
+    check("asking a question needs a terminal", g.uninstall_needs_terminal(tmp, "./uninstall.sh"), True)
+    check("a missing script does not", g.uninstall_needs_terminal(tmp, "./nope.sh --uninstall"), False)
+
 print("\nALL OK" if not failed else f"\n{len(failed)} FAILED: {failed}")
 sys.exit(1 if failed else 0)

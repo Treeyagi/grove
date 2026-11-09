@@ -591,14 +591,38 @@ def safe_project_folder(path, projects_dir):
     return p.startswith(root + os.sep) and p != root and p != home and not home.startswith(p + os.sep)
 
 
-def own_uninstall(path, run):
-    """'./app --uninstall' when the program says it has an --uninstall option in its first few KB. Empty otherwise."""
+def _head(path, rel, n=4096):
     try:
-        with open(os.path.join(path, shlex.split(run)[0]), "rb") as f:
-            head = f.read(4096)
-    except (OSError, ValueError, IndexError):
-        return ""
-    return f"{run} --uninstall" if b"--uninstall" in head else ""
+        with open(os.path.join(path, rel), "rb") as f:
+            return f.read(n)
+    except OSError:
+        return b""
+
+
+def own_uninstall(path, run):
+    """The command that undoes a project's install, or '': its run program's own --uninstall, an uninstall.sh in the
+    folder, or an install.sh that has an --uninstall option (each is looked for in the first few KB / by name)."""
+    try:
+        prog = shlex.split(run)[0] if run else ""
+    except ValueError:
+        prog = ""
+    if prog and b"--uninstall" in _head(path, prog):
+        return f"{run} --uninstall"
+    if os.path.isfile(os.path.join(path, "uninstall.sh")) and _is_exec(os.path.join(path, "uninstall.sh")):
+        return "./uninstall.sh"
+    if b"--uninstall" in _head(path, "install.sh"):
+        return "./install.sh --uninstall"
+    return ""
+
+
+def uninstall_needs_terminal(path, cmd):
+    """Does this uninstall command (or the script it runs) ask for a password or an answer? Then it needs a terminal."""
+    try:
+        prog = shlex.split(cmd)[0]
+    except (ValueError, IndexError):
+        return False
+    text = _head(path, prog, 65536).decode("utf-8", "replace")
+    return bool(re.search(r"\b(sudo|pkexec|su)\b|\bread\s+-", text))
 
 
 def _deps_step(path, run):
@@ -1729,6 +1753,10 @@ class Grove(Adw.ApplicationWindow):
         entries = start_menu_entries(path) if path else []
         can_delete = safe_project_folder(path, self.settings["projects_dir"])
         lines = []
+        own = own_uninstall(path, d.get("run") or "") if path and os.path.isdir(path) else ""
+        if own:
+            lines.append(f"Its own uninstall runs first: {own}"
+                         + ("\nA terminal window opens for it (it may ask for your password)." if uninstall_needs_terminal(path, own) else ""))
         if entries:
             lines.append("Start menu: " + ", ".join(name for _f, name, _i in entries))
         else:
@@ -1777,10 +1805,34 @@ class Grove(Adw.ApplicationWindow):
             self.toast(f"Uninstalled {d['name']}: removed {n} start-menu entr{'y' if n == 1 else 'ies'}."
                        f"{'' if kept else ' Folder deleted.'}{kept}{note}")
 
-        if own:
+        problem = " Its own uninstall step reported a problem."
+        if own and uninstall_needs_terminal(path, own):
+            # it may ask for a password: run it in a terminal and carry on once it has written its exit code
+            status = os.path.join(tempfile.mkdtemp(prefix="grove-uninstall-"), "rc")
+            self.open_terminal(d, f"{own}; echo $? > {shlex.quote(status)}")
+            waited = [0]
+
+            def check():
+                waited[0] += 1
+                if os.path.exists(status):
+                    try:
+                        rc = open(status).read().strip()
+                    except OSError:
+                        rc = "1"
+                    shutil.rmtree(os.path.dirname(status), ignore_errors=True)
+                    finish("" if rc == "0" else problem)
+                    return False
+                if waited[0] > 2400:   # 20 minutes: the window was closed before the step finished
+                    shutil.rmtree(os.path.dirname(status), ignore_errors=True)
+                    self.toast(f"The uninstall step for {d['name']} didn't finish, so its folder was left alone.")
+                    return False
+                return True
+            self.toast("Finish the uninstall in the terminal window…")
+            GLib.timeout_add(500, check)
+        elif own:
             cmd = f"cd {shlex.quote(path)} && timeout 60 {own} </dev/null"
             self.run_async(["sh", "-c", cmd],
-                           lambda proc, _o, _e: finish("" if proc.get_exit_status() == 0 else " Its own uninstall step reported a problem."))
+                           lambda proc, _o, _e: finish("" if proc.get_exit_status() == 0 else problem))
         else:
             finish()
 

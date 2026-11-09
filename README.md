@@ -47,8 +47,9 @@ First launch shows a short welcome tour (reopen it from the menu). Tap a project
   contains (an AppImage, `run.sh`/`start.sh`, a `.desktop` file's `Exec=`, or the one program in the folder), and
   otherwise from the README: the first safe command in a code block under an install or run heading, checked
   against the files that are really there (never `sudo`, `curl | sh` or the like). You can still edit both commands.
-- **Uninstall.** A project that is on your computer has an **Uninstall…** row. It runs the project's own
-  `--uninstall` if it has one, removes the start-menu entries (`~/.local/share/applications/*.desktop`) that point into
+- **Uninstall.** A project that is on your computer has an **Uninstall…** row. It first runs the project's own
+  uninstall if it has one (its run program's `--uninstall`, an executable `uninstall.sh`, or `install.sh --uninstall`;
+  one that needs a password opens in a terminal), then removes the start-menu entries (`~/.local/share/applications/*.desktop`) that point into
   the project's folder, and deletes the folder, but only when it is inside your Projects folder. The project stays on
   your list as "Not installed" so you can Get it again. It asks first and shows what will go.
 - **Updates.** A project Grove downloaded from a release shows an **Update to vX** button when a newer release
