@@ -77,3 +77,6 @@ Menu > **Share a private repo…** opens a two-sided wizard.
   release downloads work on them. The token is only sent to GitHub, and only for the repos of the person who shared it;
   your own `gh` login is used for everything else. Remove it any time from the same wizard, or revoke it on GitHub.
 
+## Memory
+
+Grove draws with GTK's plain CPU renderer by default, which keeps it around 90 MB instead of about 240 MB (it never loads the OpenGL stack). To use the GPU renderer instead, start it with `GSK_RENDERER=ngl`.
