@@ -713,7 +713,9 @@ class Grove(Adw.ApplicationWindow):
         layers.add_overlay(self.toasts)
         layers.set_measure_overlay(self.toasts, True)
         self.set_content(layers)
-        self._bg_kind, self._bg_busy = "", False
+        self._bg_kind, self._bg_want, self._bg_since = "", "", 0.0
+        self._media, self._bg_fetching, self._bg_old = {}, set(), None
+        self._bg_frames, self._bg_checked, self._bg_slow_count, self._bg_hooked = 0, time.monotonic(), 0, False
         self._bg_fmt = int(self.settings.get("background_fmt", 0))   # which file type this computer can play
         # one screen at a time, like a phone: the project list, and a page for the one you tapped
         self.split = Adw.NavigationSplitView(collapsed=True, min_sidebar_width=280, max_sidebar_width=900)
@@ -763,7 +765,8 @@ class Grove(Adw.ApplicationWindow):
             "farm", None, GLib.Variant.new_boolean(self.settings.get("background") == "farm"))
         self.farm_action.connect("change-state", self._toggle_farm)
         self.add_action(self.farm_action)
-        GLib.timeout_add_seconds(2, self._bg_tick)
+        GLib.timeout_add(500, self._bg_tick)
+        GLib.timeout_add_seconds(1, self._bg_watch)
 
         factory = Gtk.SignalListItemFactory()
         factory.connect("setup", self._row_setup)
@@ -856,39 +859,98 @@ class Grove(Adw.ApplicationWindow):
     def bg_path(self, kind):
         return os.path.join(BG_DIR, BG_FILES[kind][self._bg_fmt])
 
-    def stop_background(self):
-        """Take the playing video out of the window first: swapping it while it draws crashes GTK's renderer."""
-        old = self.bg_video.get_paintable()
+    def _media_for(self, kind):
+        """The video for this window shape, loaded once and kept (None if its file isn't here yet)."""
+        m = self._media.get(kind)
+        if m is None:
+            path = self.bg_path(kind)
+            if not os.path.exists(path):
+                return None
+            m = Gtk.MediaFile.new_for_filename(path)
+            m.set_loop(True)
+            m.set_muted(True)
+            m.connect("notify::error", self._bg_error)
+            self._media[kind] = m
+        return m
+
+    def _stop_all(self, drop=False):
+        """Take the video out of the window and pause it. It is kept loaded for next time: freeing a video's
+        graphics resources while the window is drawing is what makes GTK freeze or crash (drop=True is only
+        for a file type this computer can't play)."""
         self.bg_video.set_paintable(None)
-        if old is not None:
-            old.pause()
-            self._bg_old = old   # keep it alive a moment so a frame in flight can finish
+        for m in self._media.values():
+            m.pause()
+        if drop:
+            self._bg_old, self._media = list(self._media.values()), {}
             GLib.timeout_add(1500, lambda: setattr(self, "_bg_old", None) or False)
 
     def apply_background(self):
-        self.stop_background()
+        """Show the right video, or none. Once loaded, both videos stay loaded and Grove only switches between
+        them: tearing a video down or starting one while the window is resizing (going fullscreen) freezes GTK."""
+        on = self.settings.get("background") == "farm"
         kind = self.bg_kind()
-        path = self.bg_path(kind)
-        if self.settings.get("background") == "farm" and os.path.exists(path):
-            GLib.timeout_add(250, lambda: self._start_background(kind, path) or False)
-            return
-        self._start_background("", "")
-
-    def _start_background(self, kind, path):
-        if kind and self.settings.get("background") == "farm" and os.path.exists(path):
-            media = Gtk.MediaFile.new_for_filename(path)
-            media.set_loop(True)
-            media.set_muted(True)
-            media.connect("notify::error", self._bg_error)
-            media.play()
-            self.bg_video.set_paintable(media)
-            self._bg_kind = kind
-            self.add_css_class("has-bg")
-            self.scrim.set_visible(True)
-        else:
+        media = self._media_for(kind) if on else None
+        if media is None:
+            self._stop_all()
             self._bg_kind = ""
             self.remove_css_class("has-bg")
             self.scrim.set_visible(False)
+            return
+        for m in self._media.values():
+            if m is not media:
+                m.pause()
+        media.play()
+        self.bg_video.set_paintable(media)
+        self._bg_slow_count = 0
+        self._bg_checked = time.monotonic()
+        self._bg_frames = 0
+        self._bg_hook_clock()
+        self._bg_kind = kind
+        self.add_css_class("has-bg")
+        self.scrim.set_visible(True)
+        GLib.timeout_add(1500, self._preload_other)
+
+    def _bg_hook_clock(self):
+        """Count the frames the window really draws, so a computer that can't keep up is noticed."""
+        clock = self.get_frame_clock()
+        if clock is not None and not self._bg_hooked:
+            clock.connect("after-paint", lambda *_: setattr(self, "_bg_frames", self._bg_frames + 1))
+            self._bg_hooked = True
+
+    def _bg_watch(self):
+        """Every second: if the video is playing but the window is drawing under ~10 frames a second (no graphics
+        acceleration, a big screen), freeze it on one picture instead of letting the whole app crawl."""
+        now = time.monotonic()
+        elapsed, frames = now - self._bg_checked, self._bg_frames
+        self._bg_checked, self._bg_frames = now, 0
+        media = self.bg_video.get_paintable()
+        if media is None or not media.get_playing() or not self.is_active() or elapsed <= 0:
+            self._bg_slow_count = 0
+            return True
+        self._bg_slow_count = self._bg_slow_count + 1 if frames / elapsed < 10 else 0
+        if self._bg_slow_count >= 3:
+            for m in self._media.values():
+                m.pause()   # the picture stays, it just stops moving
+            self._bg_slow_count = 0
+            self.toast("The moving background was slowing Grove down, so it's frozen on one picture. "
+                       "(Graphics acceleration looks off on this computer: restarting it after a driver update often fixes that.)")
+        return True
+
+    def _preload_other(self):
+        """Get the other window shape's video ready (downloaded and loaded, paused) while nothing is resizing."""
+        if self.settings.get("background") != "farm" or not self._bg_kind:
+            return False
+        other = "wide" if self._bg_kind == "portrait" else "portrait"
+        if other in self._media:
+            return False
+
+        def ready(ok):
+            if ok and self.settings.get("background") == "farm" and self._bg_kind:
+                m = self._media_for(other)
+                if m is not None and self.bg_video.get_paintable() is not m:
+                    m.pause()
+        self.fetch_background(other, ready)
+        return False
 
     def _bg_error(self, media, _pspec):
         """This computer can't play that file type: try the other one, and if both fail, switch the option off."""
@@ -898,22 +960,27 @@ class Grove(Adw.ApplicationWindow):
             self._bg_fmt = 1
             self.settings["background_fmt"] = 1
             self.save()
+            self._stop_all(drop=True)
             self.fetch_background(self.bg_kind(), lambda ok: self.apply_background() if ok else None)
             return
         self.toast("This computer can't play the background video (it needs the GStreamer video plugins)")
         self.farm_action.change_state(GLib.Variant.new_boolean(False))
 
     def fetch_background(self, kind, done):
-        """Download one of the videos (about a dozen MB) if it isn't here yet; done(ok)."""
+        """Download one of the videos (about 10 MB) if it isn't here yet; done(ok)."""
         path = self.bg_path(kind)
         if os.path.exists(path):
             done(True)
             return
+        if kind in self._bg_fetching:   # already on its way
+            return
+        self._bg_fetching.add(kind)
         os.makedirs(BG_DIR, exist_ok=True)
         tmp = path + ".part"
 
         def got(proc, _o, _e):
-            ok = proc.get_exit_status() == 0 and os.path.getsize(tmp) > 100_000 if os.path.exists(tmp) else False
+            self._bg_fetching.discard(kind)
+            ok = proc.get_exit_status() == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 100_000
             if ok:
                 os.replace(tmp, path)
             elif os.path.exists(tmp):
@@ -934,7 +1001,8 @@ class Grove(Adw.ApplicationWindow):
         if not on:
             self.apply_background()
             return
-        self.toast("Getting the cow farm video (about 10 MB, only the first time)…")
+        if not os.path.exists(self.bg_path(self.bg_kind())):
+            self.toast("Getting the cow farm video (about 10 MB, only the first time)…")
 
         def done(ok):
             if ok:
@@ -947,16 +1015,16 @@ class Grove(Adw.ApplicationWindow):
         self.fetch_background(self.bg_kind(), done)
 
     def _bg_tick(self):
-        """Swap to the other video when the window changes from tall to wide (or back)."""
-        if self.settings.get("background") == "farm" and self._bg_kind and not self._bg_busy and self.bg_kind() != self._bg_kind:
-            kind = self.bg_kind()
-            self._bg_busy = True
-
-            def done(ok):
-                self._bg_busy = False
-                if ok and self.bg_kind() == kind:
-                    self.apply_background()
-            self.fetch_background(kind, done)
+        """Switch to the other (already loaded) video once the window has kept its new shape for a moment."""
+        kind = self.bg_kind()
+        if self.settings.get("background") != "farm" or not self._bg_kind or kind == self._bg_kind:
+            self._bg_want = ""
+            return True
+        if self._bg_want != kind:
+            self._bg_want, self._bg_since = kind, time.monotonic()
+        elif time.monotonic() - self._bg_since >= 1.2 and kind in self._media:
+            self._bg_want = ""
+            self.apply_background()
         return True
 
     def _toggle_hackers(self, action, value):
