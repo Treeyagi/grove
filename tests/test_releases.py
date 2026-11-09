@@ -133,5 +133,17 @@ open(os.path.join(d, "README.md"), "w").write("## Install\n```bash\npython3 tool
 check("source clone: deps, install, run", g.detect_commands(d),
       ("sh tools/install-deps.sh --yes && python3 tools/install.py", "python3 overlay/main.py"))
 
+# self-update
+d = tempfile.mkdtemp()
+cur = os.path.join(d, "grove.py")
+open(cur, "w").write("class Grove: pass\n")
+check("update: same file is not an update", g.update_available("class Grove: pass\n", cur), False)
+check("update: newer file is", g.update_available("class Grove: pass\nX = 1\n", cur), True)
+check("update: broken python is refused", g.update_available("class Grove(:\n", cur), False)
+check("update: a page that isn't Grove is refused", g.update_available("print(1)\n", cur), False)
+g.write_update("class Grove: pass\nX = 1\n", cur)
+check("update: written and runnable", (open(cur).read(), os.access(cur, os.X_OK), os.listdir(d)),
+      ("class Grove: pass\nX = 1\n", True, ["grove.py"]))
+
 print("\nALL OK" if not failed else f"\nFAILED: {failed}")
 sys.exit(1 if failed else 0)

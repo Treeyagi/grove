@@ -27,6 +27,8 @@ CONFIG = os.path.join(GLib.get_user_config_dir(), "grove", "config.json")
 CACHE_DIR = os.path.join(GLib.get_user_cache_dir(), "grove", "readmes")
 INBOX = "Unsorted"
 FEATURED = "Treeyagi"  # always synced and pinned first, for everyone
+SELF_URL = "https://raw.githubusercontent.com/Treeyagi/grove/main/grove.py"
+INSTALLED = os.path.join(GLib.get_user_data_dir(), "grove", "grove.py")   # where install.sh puts it
 USERNAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 
 # argv inserted between the terminal executable and the command to run
@@ -263,6 +265,31 @@ def unpack(archive, dest):
         for e in os.listdir(aside):
             shutil.move(os.path.join(aside, e), os.path.join(dest, e))
         os.rmdir(aside)
+
+
+def is_installed_copy():
+    """Is this the copy install.sh put in ~/.local/share/grove? (A checkout being developed is never overwritten.)"""
+    return os.path.realpath(__file__) == os.path.realpath(INSTALLED)
+
+
+def update_available(remote, local_path=None):
+    """True when `remote` (grove.py text from GitHub) is a working, different version of the file on disk."""
+    try:
+        compile(remote, "grove.py", "exec")
+        with open(local_path or __file__, encoding="utf-8") as f:
+            return "class Grove" in remote and remote != f.read()
+    except (SyntaxError, ValueError, OSError):
+        return False
+
+
+def write_update(remote, dest=None):
+    """Replace grove.py with the new text, all at once (a half-written file can't happen)."""
+    dest = dest or INSTALLED
+    tmp = dest + ".new"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(remote)
+    os.chmod(tmp, 0o755)
+    os.replace(tmp, dest)
 
 
 def _is_exec(path):
@@ -594,15 +621,23 @@ class Grove(Adw.ApplicationWindow):
         header.pack_start(sync)
         header.pack_start(add_proj)
         header.pack_start(add_grp)
+        self.update_btn = Gtk.Button(icon_name="software-update-available-symbolic", visible=False,
+                                     tooltip_text="A new version of Grove is out: update and restart", css_classes=["suggested-action"])
+        self.update_btn.connect("clicked", lambda *_: self.update_self())
+        header.pack_end(self.update_btn)
         menu = Gio.Menu()
         menu.append("Re-read all READMEs", "win.readmes")
         menu.append("Bring back removed repos", "win.restore")
         menu.append("Hackers theme", "win.hackers")
+        menu.append("Update Grove", "win.update")
         menu.append("Settings", "win.settings")
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu))
         act = Gio.SimpleAction.new("settings", None)
         act.connect("activate", lambda *_: self.show_settings())
         self.add_action(act)
+        upd = Gio.SimpleAction.new("update", None)
+        upd.connect("activate", lambda *_: self.update_self())
+        self.add_action(upd)
         restore = Gio.SimpleAction.new("restore", None)
         restore.connect("activate", lambda *_: self.restore_removed())
         self.add_action(restore)
@@ -736,6 +771,38 @@ class Grove(Adw.ApplicationWindow):
     @property
     def tree(self):
         return self.data["tree"]
+
+    def update_self(self, quiet=False):
+        """Fetch grove.py from GitHub; if it is newer, install it over this copy and restart. quiet = only show
+        the header button when there is an update (the check on startup)."""
+        if not is_installed_copy():
+            if not quiet:
+                self.toast("This copy of Grove isn't the installed one: re-run the install command to update it")
+            return
+        if not quiet:
+            self.toast("Checking for a new version of Grove…")
+
+        def got(proc, out, _err):
+            if proc.get_exit_status() != 0:
+                if not quiet:
+                    self.toast("Couldn't reach GitHub to check for updates")
+                return
+            if not update_available(out):
+                if not quiet:
+                    self.toast("Grove is up to date")
+                return
+            if quiet:
+                self.update_btn.set_visible(True)
+                return
+            try:
+                write_update(out)
+            except OSError as e:
+                self.toast(f"Couldn't update Grove: {e}")
+                return
+            self.toast("Updated: restarting Grove…")
+            spawn([sys.executable, INSTALLED])
+            GLib.timeout_add(600, lambda: self.get_application().quit())
+        self.run_async(["curl", "-fsSL", "--max-time", "15", SELF_URL], got)
 
     def toast(self, msg):
         self.toasts.add_toast(Adw.Toast(title=msg, timeout=4))
@@ -1808,7 +1875,11 @@ class App(Adw.Application):
 
     def do_activate(self):
         Gtk.Window.set_default_icon_name(ICON_NAME)
-        (self.props.active_window or Grove(self)).present()
+        win = self.props.active_window
+        if not win:
+            win = Grove(self)
+            GLib.timeout_add_seconds(3, lambda: win.update_self(quiet=True) and False)
+        win.present()
 
 
 if __name__ == "__main__":
