@@ -686,7 +686,7 @@ def project_icon(d):
 
 class Grove(Adw.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title="Grove", default_width=980, default_height=660)
+        super().__init__(application=app, title="Grove", default_width=560, default_height=800)
         self.load()
         self.update_checked = set()   # projects already asked about a newer release this session
         self.latest_tags = {}         # project id -> the newer release found
