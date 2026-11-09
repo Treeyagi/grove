@@ -22,7 +22,7 @@ gi.require_version("Adw", "1")
 # GTK's plain CPU renderer draws this simple list with about a third of the memory of the OpenGL one
 # (it never loads the GL/LLVM stack). Set GSK_RENDERER=ngl before starting Grove to use the GPU one instead.
 os.environ.setdefault("GSK_RENDERER", "cairo")
-from gi.repository import Adw, Gio, GLib, GObject, Gtk  # noqa: E402
+from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
 APP_ID = "io.github.grove.Launcher"
 ICON_NAME = "io.github.grove.Launcher"  # the wizard-tree icon installed by install.sh
@@ -955,8 +955,10 @@ class Grove(Adw.ApplicationWindow):
         box = Gtk.Box(spacing=12, margin_top=6, margin_bottom=6)
         box.icon = Gtk.Label(css_classes=["app-icon", "small"], valign=Gtk.Align.CENTER)
         box.icon.set_size_request(40, 40)
-        box.label = Gtk.Label(xalign=0, ellipsize=3, css_classes=["row-title"])
-        box.sub = Gtk.Label(xalign=0, ellipsize=3, css_classes=["dim-label", "caption"])
+        # wrap instead of cutting off, so a narrow window stays readable (the blurb stops after 3 lines)
+        box.label = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR, css_classes=["row-title"])
+        box.sub = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR, lines=3,
+                            ellipsize=Pango.EllipsizeMode.END, css_classes=["dim-label", "caption"])
         text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER)
         text.append(box.label)
         text.append(box.sub)
@@ -1130,7 +1132,7 @@ class Grove(Adw.ApplicationWindow):
         meta = " · ".join(m for m in [d.get("language"), "Private" if d.get("private") else "Public" if d["url"] else None,
                                       f"Updated {d['updated']}" if d.get("updated") else None] if m)
         if meta:
-            hero.append(Gtk.Label(label=meta, css_classes=["dim-label", "caption"]))
+            hero.append(Gtk.Label(label=meta, wrap=True, justify=Gtk.Justification.CENTER, css_classes=["dim-label", "caption"]))
 
         # the one button
         if here and d.get("install") and not d.get("run"):   # something to set up, nothing to start (a wallpaper pack, say)
@@ -1147,7 +1149,7 @@ class Grove(Adw.ApplicationWindow):
         hero.append(main)
         status = ("Installed" + (f" · {rel['tag']}" if rel.get("tag") else "")) if here else \
             "Not installed yet" if d["url"] else "Choose a repository or folder under Advanced"
-        hero.append(Gtk.Label(label=status, css_classes=["dim-label", "caption"]))
+        hero.append(Gtk.Label(label=status, wrap=True, justify=Gtk.Justification.CENTER, css_classes=["dim-label", "caption"]))
         newer = self.latest_tags.get(d["id"])
         if newer and rel and newer["tag"] != rel["tag"]:
             up = Gtk.Button(child=Adw.ButtonContent(icon_name="software-update-available-symbolic",
@@ -1277,7 +1279,7 @@ class Grove(Adw.ApplicationWindow):
             return d["description"]
         text = self.readme_text(d)
         summary = summarize(text)[0] if text else ""
-        return summary[:90] + ("…" if len(summary) > 90 else "")
+        return summary[:200] + ("…" if len(summary) > 200 else "")
 
     def search_store(self):
         store = Gio.ListStore(item_type=Node)
