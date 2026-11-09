@@ -28,7 +28,7 @@ Options go after `sh -s --`, for example `... | sh -s -- --no-launch` or `... | 
 
 ## Using it
 
-First launch shows a short welcome tour (reopen it from the menu). Click a project and press the big button: **Install & open** downloads, sets up and starts it; once it's on your computer the button says **Open**.
+First launch shows a short welcome tour (reopen it from the menu). Tap a project: the one big button says **Get** (downloads and sets it up), then **Open**. Groups are headings you can fold; their ⋯ button renames, moves or deletes them. Everything else is in the two menus at the top.
 
 - Press the refresh button to sync your repos into an "Unsorted" group, then move them into your own groups.
 - Every project shows a plain-language summary taken from its README (with a button to read the whole thing),

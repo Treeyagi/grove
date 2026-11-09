@@ -108,6 +108,23 @@ window.hackers scrollbar slider { background: #00e5ff; border-radius: 0; }
 """
 
 
+# The everyday look: soft rounded app icons, big titles, one big pill button.
+GRADS = [("#ff9a8b", "#ff4d6d"), ("#fbc2eb", "#a18cd1"), ("#84fab0", "#12b886"), ("#fccb90", "#ff8a3d"),
+         ("#a1c4fd", "#3b82f6"), ("#fad0c4", "#e56b9b"), ("#a6c0fe", "#7c5cff"), ("#f6d365", "#f4a62a")]
+APP_CSS = """
+.app-icon { color: white; font-weight: 800; }
+.app-icon.big { border-radius: 24px; font-size: 48px; box-shadow: 0 8px 22px rgba(0,0,0,0.28); }
+.app-icon.small { border-radius: 10px; font-size: 18px; }
+.hero-title { font-size: 30px; font-weight: 800; }
+button.get-button { font-weight: 800; font-size: 17px; padding: 8px 44px; min-height: 40px; }
+.section-title { font-weight: 700; font-size: 13px; opacity: 0.6; }
+.row-title { font-weight: 600; }
+listview.home-list { background: transparent; }
+listview.home-list > row { margin: 1px 10px; border-radius: 12px; }
+searchentry.pill-search { border-radius: 999px; min-height: 36px; }
+""" + "".join(f".grad{i} {{ background-image: linear-gradient(135deg, {a}, {b}); }}\n" for i, (a, b) in enumerate(GRADS))
+
+
 def detect(candidates, default):
     return next((c for c in candidates if shutil.which(c)), default)
 
@@ -635,9 +652,38 @@ def build_store(items, blurb=lambda d: ""):
     return store
 
 
+class Column(Gtk.ScrolledWindow):
+    """A scrolling, centred, phone-width page: add() puts things in a vertical stack."""
+    def __init__(self):
+        super().__init__(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18, margin_top=24, margin_bottom=28,
+                           margin_start=16, margin_end=16)
+        self.set_child(Adw.Clamp(maximum_size=520, child=self.box))
+
+    def add(self, widget):
+        self.box.append(widget)
+
+
+def grad_class(name):
+    return f"grad{sum(map(ord, name or '?')) % len(GRADS)}"
+
+
+def project_icon(d):
+    """A real icon from a downloaded project's folder (icon / logo / <name> as png or svg), else None."""
+    path = os.path.expanduser(d.get("path") or "")
+    if not os.path.isdir(path):
+        return None
+    wanted = {"icon", "logo", re.sub(r"[^a-z0-9]", "", d["name"].lower())}
+    for f in sorted(os.listdir(path)):
+        stem, ext = os.path.splitext(f)
+        if ext.lower() in (".png", ".svg") and re.sub(r"[^a-z0-9]", "", stem.lower()) in wanted:
+            return os.path.join(path, f)
+    return None
+
+
 class Grove(Adw.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title="Grove", default_width=1000, default_height=680)
+        super().__init__(application=app, title="Grove", default_width=560, default_height=800)
         self.load()
         self.update_checked = set()   # projects already asked about a newer release this session
         self.latest_tags = {}         # project id -> the newer release found
@@ -649,51 +695,45 @@ class Grove(Adw.ApplicationWindow):
 
         self.toasts = Adw.ToastOverlay()
         self.set_content(self.toasts)
-        split = Adw.NavigationSplitView(min_sidebar_width=280, max_sidebar_width=380)
+        # one screen at a time, like a phone: the project list, and a page for the one you tapped
+        self.split = Adw.NavigationSplitView(collapsed=True, min_sidebar_width=280, max_sidebar_width=900)
+        self.split.connect("notify::show-content", self._on_back)
+        split = self.split
         self.toasts.set_child(split)
+        self._allow_group = False
 
-        # sidebar
+        # home: a title, one menu to add things, one menu for everything else
         header = Adw.HeaderBar()
-        sync = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Sync repos from GitHub")
-        sync.connect("clicked", lambda *_: self.sync())
-        add_proj = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="Add project")
-        add_proj.connect("clicked", lambda *_: self.add_project())
-        add_grp = Gtk.Button(icon_name="folder-new-symbolic", tooltip_text="New group")
-        add_grp.connect("clicked", lambda *_: self.add_group())
-        header.pack_start(sync)
-        header.pack_start(add_proj)
-        header.pack_start(add_grp)
+        plus = Gio.Menu()
+        plus.append("Sync from GitHub", "win.sync")
+        plus.append("Add a project", "win.addproject")
+        plus.append("New group", "win.addgroup")
+        header.pack_start(Gtk.MenuButton(icon_name="list-add-symbolic", menu_model=plus, tooltip_text="Add"))
         self.update_btn = Gtk.Button(icon_name="software-update-available-symbolic", visible=False,
                                      tooltip_text="A new version of Grove is out: update and restart", css_classes=["suggested-action"])
         self.update_btn.connect("clicked", lambda *_: self.update_self())
         header.pack_end(self.update_btn)
         menu = Gio.Menu()
-        menu.append("Re-read all READMEs", "win.readmes")
-        menu.append("Bring back removed repos", "win.restore")
-        menu.append("Hacker-movie theme", "win.hackers")
-        menu.append("Welcome tour", "win.welcome")
-        menu.append("Share a private repo…", "win.share")
-        menu.append("Update Grove", "win.update")
-        menu.append("Settings", "win.settings")
-        header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu))
-        act = Gio.SimpleAction.new("settings", None)
-        act.connect("activate", lambda *_: self.show_settings())
-        self.add_action(act)
-        tour = Gio.SimpleAction.new("welcome", None)
-        tour.connect("activate", lambda *_: self.show_welcome())
-        self.add_action(tour)
-        share = Gio.SimpleAction.new("share", None)
-        share.connect("activate", lambda *_: self.show_share_wizard())
-        self.add_action(share)
-        upd = Gio.SimpleAction.new("update", None)
-        upd.connect("activate", lambda *_: self.update_self())
-        self.add_action(upd)
-        restore = Gio.SimpleAction.new("restore", None)
-        restore.connect("activate", lambda *_: self.restore_removed())
-        self.add_action(restore)
-        reread = Gio.SimpleAction.new("readmes", None)
-        reread.connect("activate", lambda *_: self.prefetch_readmes(force=True))
-        self.add_action(reread)
+        top = Gio.Menu()
+        top.append("Share a private repo…", "win.share")
+        top.append("Welcome tour", "win.welcome")
+        top.append("Update Grove", "win.update")
+        menu.append_section(None, top)
+        more = Gio.Menu()
+        more.append("Hacker-movie theme", "win.hackers")
+        more.append("Re-read all READMEs", "win.readmes")
+        more.append("Bring back removed repos", "win.restore")
+        more.append("Settings", "win.settings")
+        menu.append_section(None, more)
+        header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, tooltip_text="More"))
+        for name, fn in (("settings", self.show_settings), ("welcome", self.show_welcome),
+                         ("share", self.show_share_wizard), ("update", self.update_self),
+                         ("restore", self.restore_removed), ("sync", self.sync),
+                         ("addproject", self.add_project), ("addgroup", self.add_group),
+                         ("readmes", lambda: self.prefetch_readmes(force=True))):
+            act = Gio.SimpleAction.new(name, None)
+            act.connect("activate", lambda _a, _p, fn=fn: fn())
+            self.add_action(act)
         theme = Gio.SimpleAction.new_stateful(
             "hackers", None, GLib.Variant.new_boolean(self.settings["hackers"]))
         theme.connect("change-state", self._toggle_hackers)
@@ -703,20 +743,17 @@ class Grove(Adw.ApplicationWindow):
         factory.connect("setup", self._row_setup)
         factory.connect("bind", self._row_bind)
         factory.connect("unbind", self._row_unbind)
-        self.view = Gtk.ListView(factory=factory, css_classes=["navigation-sidebar"])
-        self.view.connect("activate", self._row_activated)
-        side = Adw.ToolbarView(content=Gtk.ScrolledWindow(child=self.view))
+        self.view = Gtk.ListView(factory=factory, css_classes=["navigation-sidebar", "home-list"])
+        self.empty_bin = Adw.Bin()
+        self.side_stack = Gtk.Stack()
+        self.side_stack.add_named(Adw.Clamp(maximum_size=640, child=Gtk.ScrolledWindow(child=self.view)), "list")
+        self.side_stack.add_named(self.empty_bin, "empty")
+        side = Adw.ToolbarView(content=self.side_stack)
         side.add_top_bar(header)
-        self.search = Gtk.SearchEntry(placeholder_text="Search projects…", margin_start=8,
-                                      margin_end=8, margin_bottom=8)
+        self.search = Gtk.SearchEntry(placeholder_text="Search", margin_start=16, margin_end=16, margin_bottom=8,
+                                      css_classes=["pill-search"])
         self.search.connect("search-changed", self._on_search)
         side.add_top_bar(self.search)
-        bottom = Gtk.ActionBar()
-        rm_btn = Gtk.Button(icon_name="user-trash-symbolic", tooltip_text="Remove the selected repo or group (Delete)",
-                            css_classes=["flat"])
-        rm_btn.connect("clicked", lambda *_: self.remove_selected())
-        bottom.pack_start(rm_btn)
-        side.add_bottom_bar(bottom)
         keys = Gtk.ShortcutController()
         keys.add_shortcut(Gtk.Shortcut.new(Gtk.ShortcutTrigger.parse_string("Delete"),
                                            Gtk.CallbackAction.new(lambda *_: self.remove_selected() or True)))
@@ -724,7 +761,7 @@ class Grove(Adw.ApplicationWindow):
         self.side_page = Adw.NavigationPage(title="Projects", child=side)
         split.set_sidebar(self.side_page)
 
-        # content
+        # a project's page
         self.detail = Adw.Bin()
         content = Adw.ToolbarView(content=self.detail)
         content.add_top_bar(Adw.HeaderBar())
@@ -749,11 +786,12 @@ class Grove(Adw.ApplicationWindow):
     def load_css(self):
         if Grove._css_loaded:
             return
-        provider = Gtk.CssProvider()
-        provider.load_from_string(HACKERS_CSS) if hasattr(provider, "load_from_string") \
-            else provider.load_from_data(HACKERS_CSS.encode())
-        Gtk.StyleContext.add_provider_for_display(
-            self.get_display(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        for css in (APP_CSS, HACKERS_CSS):
+            provider = Gtk.CssProvider()
+            provider.load_from_string(css) if hasattr(provider, "load_from_string") \
+                else provider.load_from_data(css.encode())
+            Gtk.StyleContext.add_provider_for_display(
+                self.get_display(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         Grove._css_loaded = True
 
     def logo(self, size):
@@ -777,7 +815,7 @@ class Grove(Adw.ApplicationWindow):
         Adw.StyleManager.get_default().set_color_scheme(
             Adw.ColorScheme.FORCE_DARK if on else Adw.ColorScheme.DEFAULT)
         self.set_title("GROVE // HACK THE PLANET" if on else "Grove")
-        self.side_page.set_title("TARGETS" if on else "Projects")
+        self.side_page.set_title("TARGETS" if on else "Grove")
         self.content_page.set_title("PAYLOAD" if on else "Details")
         if self.detail.get_child():
             self.show_detail()
@@ -899,15 +937,19 @@ class Grove(Adw.ApplicationWindow):
         pos = next((i for i in range(model.get_n_items())
                     if model.get_item(i).get_item().data["id"] == select), Gtk.INVALID_LIST_POSITION)
         self.sel.set_selected(pos)
-        self.sel.connect("notify::selected", lambda *_: self.show_detail())
+        self.sel.connect("notify::selected", self._selected)
         self.view.set_model(self.sel)
+        has_any = any(d["type"] == "project" for d, *_ in walk(self.tree))
+        self.empty_bin.set_child(self.empty_page())
+        self.side_stack.set_visible_child_name("list" if has_any or self.query else "empty")
         self.show_detail()
         self.save()
 
     def _row_setup(self, _f, item):
-        box = Gtk.Box(spacing=8)
-        box.icon = Gtk.Image()
-        box.label = Gtk.Label(xalign=0, ellipsize=3)
+        box = Gtk.Box(spacing=12, margin_top=6, margin_bottom=6)
+        box.icon = Gtk.Label(css_classes=["app-icon", "small"], valign=Gtk.Align.CENTER)
+        box.icon.set_size_request(40, 40)
+        box.label = Gtk.Label(xalign=0, ellipsize=3, css_classes=["row-title"])
         box.sub = Gtk.Label(xalign=0, ellipsize=3, css_classes=["dim-label", "caption"])
         text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER)
         text.append(box.label)
@@ -915,7 +957,12 @@ class Grove(Adw.ApplicationWindow):
         box.lock = Gtk.Image(icon_name="changes-prevent-symbolic", css_classes=["dim-label"],
                              tooltip_text="Private repository")
         box.badge = Gtk.Label(css_classes=["dim-label", "caption"])
-        for w in (box.icon, text, box.lock, box.badge):
+        box.chev = Gtk.Image(icon_name="go-next-symbolic", css_classes=["dim-label"])
+        box.more = Gtk.Button(icon_name="view-more-symbolic", css_classes=["flat", "circular"], valign=Gtk.Align.CENTER,
+                              tooltip_text="Rename, move or delete this group")
+        box.more.connect("clicked", lambda *_: self.open_group(box.node))
+        box.grad = ""
+        for w in (box.icon, text, box.lock, box.badge, box.chev, box.more):
             box.append(w)
         item.set_child(Gtk.TreeExpander(child=box))
 
@@ -923,18 +970,26 @@ class Grove(Adw.ApplicationWindow):
         row, exp = item.get_item(), item.get_child()
         node, box = row.get_item(), exp.get_child()
         exp.set_list_row(row)
+        box.node = node
         d = node.data
-        box.icon.set_from_icon_name("folder-symbolic" if node.is_group else "text-x-script-symbolic")
+        box.icon.set_visible(not node.is_group)
+        box.chev.set_visible(not node.is_group)
+        box.more.set_visible(node.is_group)
+        box.sub.set_visible(not node.is_group)
+        exp.set_hide_expander(node.is_group)   # groups are section headings: tap to fold, no arrow
+        box.label.set_css_classes(["section-title"] if node.is_group else ["row-title"])
         box.lock.set_visible(bool(d.get("private")))
         if node.is_group:
             box.badge.set_label(str(sum(1 for c, *_ in walk(d["children"]) if c["type"] == "project")))
         else:
-            cloned = os.path.isdir(os.path.expanduser(d["path"])) if d["path"] else False
-            box.badge.set_label("●" if cloned else "")
-            box.badge.set_tooltip_text("Cloned locally" if cloned else None)
+            if box.grad:
+                box.icon.remove_css_class(box.grad)
+            box.grad = grad_class(d["name"])
+            box.icon.add_css_class(box.grad)
+            box.icon.set_label((d["name"][:1] or "?").upper())
+            box.badge.set_label("Installed" if self.cloned(d) else "")
         box.binding = node.bind_property("title", box.label, "label", GObject.BindingFlags.SYNC_CREATE)
         box.sub_binding = node.bind_property("subtitle", box.sub, "label", GObject.BindingFlags.SYNC_CREATE)
-        box.sub.set_visible(not node.is_group)
 
     def _row_unbind(self, _f, item):
         box = item.get_child().get_child()
@@ -943,15 +998,45 @@ class Grove(Adw.ApplicationWindow):
                 getattr(box, name).unbind()
                 setattr(box, name, None)
 
-    def _row_activated(self, _view, pos):
-        node = self.sel.get_item(pos).get_item()
-        if not node.is_group:
-            self.open_editor(node.data)
+    def _selected(self, *_):
+        """A project opens its page; a group just folds or unfolds (its ⋯ button opens the group's own page)."""
+        node = self.current()
+        if node is not None and node.is_group and not self._allow_group:
+            row = self.sel.get_selected_item()
+            row.set_expanded(not row.get_expanded())
+            self.sel.set_selected(Gtk.INVALID_LIST_POSITION)
+            return
+        self._allow_group = False
+        self.show_detail()
+
+    def open_group(self, node):
+        model = self.sel.get_model()
+        for i in range(model.get_n_items()):
+            if model.get_item(i).get_item() is node:
+                self._allow_group = True
+                self.sel.set_selected(i)
+                return
+
+    def _on_back(self, *_):
+        """Back to the list: forget the selection so the same project can be tapped again."""
+        if not self.split.get_show_content() and self.sel and self.current() is not None:
+            self.sel.set_selected(Gtk.INVALID_LIST_POSITION)
 
     # ---- detail pane -------------------------------------------------
     def show_detail(self):
         node = self.current()
+        self.split.set_show_content(node is not None)
+        self.content_page.set_title(node.data["name"] if node else ("PAYLOAD" if self.settings["hackers"] else "Details"))
         if node is None:
+            page = self.empty_page()
+        elif node.is_group:
+            page = self.group_page(node)
+        else:
+            page = self.project_page(node)
+        self.detail.set_child(page)
+
+    def empty_page(self):
+        if True:
             hack = self.settings["hackers"]
             page = Adw.StatusPage(
                 title="ACCESS GRANTED" if hack else "Grove",
@@ -982,11 +1067,7 @@ class Grove(Adw.ApplicationWindow):
             tour = Gtk.Button(label=self.T("How does this work?"), halign=Gtk.Align.CENTER, css_classes=["flat"])
             tour.connect("clicked", lambda *_: self.show_welcome())
             parent.append(tour)
-        elif node.is_group:
-            page = self.group_page(node)
-        else:
-            page = self.project_page(node)
-        self.detail.set_child(page)
+        return page
 
     def entry(self, title, d, key, node=None):
         row = Adw.EntryRow(title=title, text=d.get(key, ""))
@@ -1029,23 +1110,50 @@ class Grove(Adw.ApplicationWindow):
         d = node.data
         if repo_slug(d["url"]) and d["id"] not in self.fetching and self.readme_text(d) is None:
             self.fetch_readme(d, lambda: self._refresh_if_current(d))
-        page = Adw.PreferencesPage()
+        page = Column()
+        here = self.cloned(d)
+        if here:
+            self.fill_missing(d)
+        rel = d.get("release") or {}
 
-        # what is this?
-        about = Adw.PreferencesGroup()
-        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, css_classes=["card"])
-        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=14,
-                        margin_bottom=14, margin_start=16, margin_end=16)
-        card.append(inner)
-        title = Gtk.Label(xalign=0, wrap=True, css_classes=["title-2"])
+        hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, halign=Gtk.Align.CENTER)
+        hero.append(self.big_icon(d))
+        title = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, css_classes=["hero-title"], margin_top=6)
         node.bind_property("title", title, "label", GObject.BindingFlags.SYNC_CREATE)
-        inner.append(title)
-        meta = [d.get("language"), "Private" if d.get("private") else "Public" if d["url"] else None,
-                f"Updated {d['updated']}" if d.get("updated") else None,
-                "Live site" if d.get("site") else None]
-        meta = " · ".join(m for m in meta if m)
+        hero.append(title)
+        meta = " · ".join(m for m in [d.get("language"), "Private" if d.get("private") else "Public" if d["url"] else None,
+                                      f"Updated {d['updated']}" if d.get("updated") else None] if m)
         if meta:
-            inner.append(Gtk.Label(label=meta, xalign=0, css_classes=["dim-label", "caption"]))
+            hero.append(Gtk.Label(label=meta, css_classes=["dim-label", "caption"]))
+
+        # the one button
+        if here and d.get("install") and not d.get("run"):   # something to set up, nothing to start (a wallpaper pack, say)
+            icon, label, tip, act = "system-software-install-symbolic", "Install", "Run its install step", self.install
+        elif d.get("site") and not here and not d.get("run"):
+            icon, label, tip, act = "web-browser-symbolic", "Open website", "Opens the live site in your browser", self.run_project
+        elif here:
+            icon, label, tip, act = "media-playback-start-symbolic", "Open", "Start it (in a terminal window when it needs one)", self.run_project
+        else:
+            icon, label, tip, act = "system-software-install-symbolic", "Get", "Download it and set it up", self.install
+        main = Gtk.Button(child=Adw.ButtonContent(icon_name=icon, label=self.T(label)), tooltip_text=tip,
+                          css_classes=["suggested-action", "pill", "get-button"], halign=Gtk.Align.CENTER, margin_top=10)
+        main.connect("clicked", lambda b: act(d, b))
+        hero.append(main)
+        status = ("Installed" + (f" · {rel['tag']}" if rel.get("tag") else "")) if here else \
+            "Not installed yet" if d["url"] else "Choose a repository or folder under Advanced"
+        hero.append(Gtk.Label(label=status, css_classes=["dim-label", "caption"]))
+        newer = self.latest_tags.get(d["id"])
+        if newer and rel and newer["tag"] != rel["tag"]:
+            up = Gtk.Button(child=Adw.ButtonContent(icon_name="software-update-available-symbolic",
+                                                    label=f"Update to {newer['tag']}"),
+                            css_classes=["pill"], halign=Gtk.Align.CENTER, margin_top=4)
+            up.connect("clicked", lambda b: self.update_release(d, b))
+            hero.append(up)
+        elif rel and here:
+            GLib.idle_add(self.check_update, d)
+        page.add(hero)
+
+        # what is it?
         text = self.readme_text(d)
         summary, bullets = summarize(text) if text else ("", [])
         if summary:
@@ -1057,83 +1165,36 @@ class Grove(Adw.ApplicationWindow):
         elif text == "":
             blurb = "This repo has no README yet, so there's nothing to explain."
         else:
-            blurb = "No README to read yet. Add a repository URL or a folder and Grove will summarise it."
-        inner.append(Gtk.Label(label=blurb, xalign=0, wrap=True, selectable=True))
+            blurb = "No README to read yet."
+        about = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        about.append(Gtk.Label(label=blurb, xalign=0, wrap=True, selectable=True))
         if bullets:
-            inner.append(Gtk.Label(label="\n".join("•  " + b for b in bullets), xalign=0,
-                                   wrap=True, selectable=True))
-        if text:
-            row = Gtk.Box(spacing=8, margin_top=4)
-            read = Gtk.Button(label=self.T("Read full README"))
-            read.connect("clicked", lambda *_: self.show_readme(d))
-            row.append(read)
-            if d["url"]:
-                again = Gtk.Button(icon_name="view-refresh-symbolic", css_classes=["flat"],
-                                   tooltip_text="Download the README again")
-                again.connect("clicked", lambda *_: self.refetch(d))
-                row.append(again)
-            inner.append(row)
-        about.add(card)
+            about.append(Gtk.Label(label="\n".join("•  " + b for b in bullets), xalign=0, wrap=True, selectable=True,
+                                   css_classes=["dim-label"]))
         page.add(about)
 
-        # what to do next: one big button, then the rest
-        launch = Adw.PreferencesGroup()
-        here = self.cloned(d)
-        rel = d.get("release") or {}
+        def nav_row(title, icon, fn, subtitle=""):
+            row = Adw.ActionRow(title=self.T(title), subtitle=subtitle, activatable=True)
+            row.add_prefix(Gtk.Image(icon_name=icon))
+            row.add_suffix(Gtk.Image(icon_name="go-next-symbolic", css_classes=["dim-label"]))
+            row.connect("activated", lambda *_: fn())
+            return row
+        links = Adw.PreferencesGroup()
+        if text:
+            links.add(nav_row("Read the README", "text-x-generic-symbolic", lambda: self.show_readme(d)))
+        if d["url"]:
+            links.add(nav_row("View on GitHub", "web-browser-symbolic", lambda: self.open_url(d)))
+        if d.get("site"):
+            links.add(nav_row("Open the live site", "applications-internet-symbolic", lambda: self.open_site(d)))
+        page.add(links)
+        mine = Adw.PreferencesGroup()
+        mine.add(nav_row("Install again" if here else "Install without opening", "system-software-install-symbolic",
+                         lambda: self.install(d)))
         if here:
-            where = "On this computer" + (f" · {rel['tag']}" if rel.get("tag") else "")
-        elif d["url"]:
-            where = "Not on this computer yet. The big button downloads it, sets it up and opens it."
-        else:
-            where = "No repository or folder set yet: open \"Edit details and commands\" below."
-        launch.add(Gtk.Label(label=where, xalign=0, wrap=True, css_classes=["dim-label"], margin_bottom=8))
-        if here:
-            self.fill_missing(d)
-        if d.get("site") and not here and not d.get("run"):
-            icon, label, tip = "web-browser-symbolic", "Open website", "Opens the live site in your browser"
-        elif here and d.get("install") and not d.get("run"):   # something to set up, nothing to start (a wallpaper pack, say)
-            icon, label, tip = "system-software-install-symbolic", "Install", "Run its install step"
-        elif here:
-            icon, label, tip = "media-playback-start-symbolic", "Open", "Start it (in a terminal window when it needs one)"
-        else:
-            icon, label, tip = "system-software-install-symbolic", "Install & open", "Download it, set it up, then start it"
-        label_main = label
-        main = Gtk.Button(child=Adw.ButtonContent(icon_name=icon, label=self.T(label)),
-                          css_classes=["suggested-action", "pill"], tooltip_text=tip, halign=Gtk.Align.START)
-        main.connect("clicked", lambda b: (self.install if label == "Install" else self.run_project)(d, b))
-        launch.add(main)
-        newer = self.latest_tags.get(d["id"])
-        if newer and d.get("release") and newer["tag"] != d["release"]["tag"]:
-            up = Gtk.Button(child=Adw.ButtonContent(icon_name="software-update-available-symbolic",
-                                                    label=f"Update to {newer['tag']} (you have {d['release']['tag']})"),
-                            css_classes=["suggested-action"], margin_top=8)
-            up.connect("clicked", lambda b: self.update_release(d, b))
-            launch.add(up)
-        elif d.get("release") and self.cloned(d):
-            GLib.idle_add(self.check_update, d)
-        page.add(launch)
-
-        more = Adw.PreferencesGroup(title=self.T("More things you can do"))
-        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=3, min_children_per_line=2,
-                           column_spacing=8, row_spacing=8, homogeneous=True)
-        for icon, label, tip, fn, needs_folder in [
-            ("system-software-install-symbolic", "Install again" if here else "Install only",
-             "Download it if needed and run its install step, without starting it", lambda b: self.install(d, b), False),
-            ("document-edit-symbolic", "Edit code", "Open the project folder in your editor", lambda *_: self.open_editor(d), True),
-            ("utilities-terminal-symbolic", "Terminal", "Open a terminal in the project folder", lambda *_: self.open_terminal(d), True),
-            ("folder-open-symbolic", "Show folder", "Open the folder in your file manager", lambda *_: self.open_folder(d), True),
-            ("web-browser-symbolic", "GitHub page", "Open the repository page in your browser", lambda *_: self.open_url(d), False),
-        ] + ([("applications-internet-symbolic", "Live site", "Open the deployed site (GitHub Pages)",
-               lambda *_: self.open_site(d), False)] if d.get("site") else []):
-            b = Gtk.Button(child=Adw.ButtonContent(icon_name=icon, label=self.T(label)),
-                           tooltip_text=tip if here or not needs_folder else "Get it first: use the big button above")
-            b.set_sensitive(here or not needs_folder)
-            b.connect("clicked", fn)
-            if label.startswith("Install") and label_main == "Install":
-                continue   # the big button already does this
-            flow.append(b)
-        more.add(flow)
-        page.add(more)
+            mine.add(nav_row("Show the folder", "folder-open-symbolic", lambda: self.open_folder(d)))
+            mine.add(nav_row("Edit the code", "document-edit-symbolic", lambda: self.open_editor(d)))
+            mine.add(nav_row("Open a terminal here", "utilities-terminal-symbolic", lambda: self.open_terminal(d)))
+        page.add(mine)
 
         # advanced, tucked away
         adv = Adw.PreferencesGroup()
@@ -1167,6 +1228,22 @@ class Grove(Adw.ApplicationWindow):
         gone.add(rm)
         page.add(gone)
         return page
+
+    def big_icon(self, d):
+        """The project's own icon if it has one, else a coloured tile with its first letter."""
+        tile = Gtk.Box(halign=Gtk.Align.CENTER, css_classes=["app-icon", "big", grad_class(d["name"])])
+        tile.set_size_request(104, 104)
+        tile.set_overflow(Gtk.Overflow.HIDDEN)
+        icon = project_icon(d)
+        if icon:
+            pic = Gtk.Picture.new_for_filename(icon)
+            pic.set_content_fit(Gtk.ContentFit.COVER)
+            tile.append(pic)
+            tile.set_css_classes(["app-icon", "big"])
+            tile.set_size_request(104, 104)
+        else:
+            tile.append(Gtk.Label(label=(d["name"][:1] or "?").upper(), hexpand=True, vexpand=True))
+        return tile
 
     # ---- readmes -------------------------------------------------------
     def readme_text(self, d):
@@ -1995,8 +2072,8 @@ class Grove(Adw.ApplicationWindow):
 
         def last():
             nav.push(page("Click a project, press the big button", "media-playback-start-symbolic",
-                          "Pick any project in the list on the left. If it isn't on your computer yet, "
-                          "\"Install & open\" downloads it, sets it up and starts it. Next time it just says \"Open\".\n\n"
+                          "Tap any project in the list. If it isn't on your computer yet, the big button says \"Get\": "
+                          "it downloads the project and sets it up. After that the same button says \"Open\".\n\n"
                           "Got a private repo from a friend? Menu > Share a private repo. "
                           "Prefer a different look? Menu > Hacker-movie theme.",
                           buttons=[("Start using Grove", dlg.close, True)]))
