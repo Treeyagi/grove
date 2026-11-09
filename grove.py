@@ -1373,9 +1373,23 @@ class Grove(Adw.ApplicationWindow):
                 except OSError as e:
                     self.toast(f"Couldn't add it to the app menu: {e}")
                 return
+            if self.settings.get("prefer_releases", True) and repo_slug(d["url"]) and not d.get("release"):
+                self._install_from_release(d, button)   # a source clone with nothing to install: maybe a release has it
+                return
             self.toast("No install step detected: it's ready to run, or set one by hand")
             return
         self.open_terminal(d, d["install"])
+
+    def _install_from_release(self, d, button):
+        """The folder is a plain source clone that can't be installed: if the repo has a release with a program
+        to download, get that instead (the old folder is renamed, not deleted) and install it."""
+        def got(rel):
+            if not (rel and pick_asset(rel["assets"])):
+                self.toast("No install step detected: it's ready to run, or set one by hand")
+                return
+            self.toast(f"No installer in the source: downloading release {rel['tag']} (old folder kept as .old-…)")
+            self.clone(d, button, then=lambda: self.install(d))
+        self.latest_release(repo_slug(d["url"]), got)
 
     def open_site(self, d):
         if d.get("site"):
