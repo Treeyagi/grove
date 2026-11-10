@@ -7,7 +7,6 @@ import random
 import re
 import shlex
 import shutil
-import stat
 import subprocess
 import sys
 import tarfile

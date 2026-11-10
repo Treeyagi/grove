@@ -166,6 +166,7 @@ check("release: REST json too", (rel["assets"][0]["api"], rel["assets"][0]["url"
 # project icons
 d = tempfile.mkdtemp()
 g.ICON_DIR_USER, g.ICON_CACHE = os.path.join(d, "user"), os.path.join(d, "cache")
+g.NEW_ICON_DIR = os.path.join(d, "cache", "v2")   # not the real cache: downloaded mascots there would win over the built-in icon
 proj = os.path.join(d, "proj"); os.makedirs(proj)
 mine = {"name": "Medllm", "path": ""}
 built = g.find_icon(mine)
