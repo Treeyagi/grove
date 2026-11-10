@@ -3,6 +3,7 @@
 import base64
 import json
 import os
+import random
 import re
 import shlex
 import shutil
@@ -24,6 +25,11 @@ gi.require_version("Adw", "1")
 # (it never loads the GL/LLVM stack). Set GSK_RENDERER=ngl before starting Grove to use the GPU one instead.
 os.environ.setdefault("GSK_RENDERER", "cairo")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
+try:
+    gi.require_version("GdkPixbuf", "2.0")
+    from gi.repository import GdkPixbuf  # noqa: E402
+except (ValueError, ImportError):   # without it Treeyagi simply isn't shown
+    GdkPixbuf = None
 
 APP_ID = "io.github.grove.Launcher"
 ICON_NAME = "io.github.grove.Launcher"  # the wizard-tree icon installed by install.sh
@@ -126,6 +132,8 @@ button.get-button { font-weight: 800; font-size: 17px; padding: 8px 44px; min-he
 listview.home-list { background: transparent; }
 listview.home-list > row { margin: 1px 10px; border-radius: 12px; }
 searchentry.pill-search { border-radius: 999px; min-height: 36px; }
+.buddy-bar { padding: 2px 14px 8px 14px; }
+.buddy-bubble { background: alpha(currentColor, 0.08); border-radius: 16px; padding: 8px 14px; font-weight: 600; }
 """ + "".join(f".grad{i} {{ background-image: linear-gradient(135deg, {a}, {b}); }}\n" for i, (a, b) in enumerate(GRADS))
 
 
@@ -197,6 +205,7 @@ def default_settings():
         "extra_users": [],     # other GitHub accounts whose public repos to follow
         "public_only": False,  # never import private repos
         "prefer_releases": True,  # Install and Run download a repo's latest release when it has one
+        "buddy": True,         # Treeyagi, the animated buddy along the bottom of the window
     }
 
 
@@ -884,12 +893,16 @@ class Grove(Adw.ApplicationWindow):
         self.fetching = {}       # project id -> callbacks, for README downloads in flight
 
         self.toasts = Adw.ToastOverlay()
-        self.set_content(self.toasts)
+        self.main_view = Adw.ToolbarView(content=self.toasts)   # the buddy's strip sits under the toasts, not beneath them
+        self.set_content(self.main_view)
         # one screen at a time: the project list, and a page for the one you tapped
         self.split = Adw.NavigationSplitView(collapsed=True, min_sidebar_width=280, max_sidebar_width=900)
         self.split.connect("notify::show-content", self._on_back)
         split = self.split
         self.toasts.set_child(split)
+        self.buddy_bar = BuddyBar()
+        self.buddy_bar.set_visible(False)
+        self.main_view.add_bottom_bar(self.buddy_bar)
         self._allow_group = False
 
         # home: a title, one menu to add things, one menu for everything else
@@ -911,6 +924,7 @@ class Grove(Adw.ApplicationWindow):
         menu.append_section(None, top)
         more = Gio.Menu()
         more.append("Hacker-movie theme", "win.hackers")
+        more.append("Show Treeyagi", "win.buddy")
         more.append("Re-read all READMEs", "win.readmes")
         more.append("Bring back removed repos", "win.restore")
         more.append("Settings", "win.settings")
@@ -928,6 +942,9 @@ class Grove(Adw.ApplicationWindow):
             "hackers", None, GLib.Variant.new_boolean(self.settings["hackers"]))
         theme.connect("change-state", self._toggle_hackers)
         self.add_action(theme)
+        pal = Gio.SimpleAction.new_stateful("buddy", None, GLib.Variant.new_boolean(self.settings.get("buddy", True)))
+        pal.connect("change-state", self._toggle_buddy)
+        self.add_action(pal)
 
         factory = Gtk.SignalListItemFactory()
         factory.connect("setup", self._row_setup)
@@ -965,6 +982,7 @@ class Grove(Adw.ApplicationWindow):
         GLib.idle_add(self.auto_sync)
         GLib.idle_add(self.prefetch_readmes)
         GLib.timeout_add(1500, self.fetch_new_icons)
+        GLib.timeout_add(1800, self.fetch_buddy)
         GLib.idle_add(self.check_all_sites)
 
     def _on_search(self, entry):
@@ -1101,6 +1119,9 @@ class Grove(Adw.ApplicationWindow):
 
     def toast(self, msg):
         self.toasts.add_toast(Adw.Toast(title=msg, timeout=4))
+        mood = buddy_mood(msg)
+        if mood and hasattr(self, "buddy_bar"):
+            self.buddy_bar.react(*mood)
 
     # ---- tree model --------------------------------------------------
     def find(self, nid):
@@ -1130,6 +1151,56 @@ class Grove(Adw.ApplicationWindow):
         name = spec.split(":", 1)[1]
         tex = self.icon_for({"id": "mascot-" + name, "name": name, "path": ""})
         return Gtk.Image(paintable=tex, pixel_size=size, halign=Gtk.Align.CENTER) if tex else None
+
+    def update_buddy(self):
+        """Show or hide the bar: on when the setting is on and the art is here."""
+        on = bool(self.settings.get("buddy", True)) and bool(buddy_data())
+        if on:
+            self.buddy_bar.refresh()
+        self.buddy_bar.set_visible(on)
+        if on and not getattr(self, "_buddy_greeted", False):
+            self._buddy_greeted = True
+            self.buddy_bar.react("hello", "Hey! I'm Treeyagi. Pick a project.")
+
+    def _toggle_buddy(self, action, value):
+        action.set_state(value)
+        self.settings["buddy"] = value.get_boolean()
+        self.save()
+        self.update_buddy()
+
+    def fetch_buddy(self):
+        """Download Treeyagi's atlas once (two small files), then show him."""
+        if buddy_ready():
+            self.update_buddy()
+            return False
+        try:
+            os.makedirs(BUDDY_DIR, exist_ok=True)
+        except OSError:
+            return False
+        left = [len(("atlas.png", "atlas.json"))]
+        ok = [True]
+
+        def one(name):
+            tmp = os.path.join(BUDDY_DIR, name + ".part")
+
+            def done(proc, _o, _e):
+                good = proc.get_exit_status() == 0 and os.path.isfile(tmp) and (valid_png(tmp) if name.endswith(".png") else True)
+                if good:
+                    os.replace(tmp, os.path.join(BUDDY_DIR, name))
+                else:
+                    ok[0] = False
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+                left[0] -= 1
+                if left[0] == 0 and ok[0]:
+                    _BUDDY.clear()
+                    self.update_buddy()
+            self.run_async(["curl", "-fsSL", "--max-time", "30", "-o", tmp, BUDDY_URL.format(name)], done)
+        for n in ("atlas.png", "atlas.json"):
+            one(n)
+        return False
 
     def fetch_new_icons(self):
         """Download the mascots that aren't cached yet, one curl each. When the last one lands, redraw the list."""
@@ -1329,6 +1400,11 @@ class Grove(Adw.ApplicationWindow):
                                        else "folder-symbolic")
                 parent = Gtk.Box(halign=Gtk.Align.CENTER)
                 page.set_child(parent)
+                big = Buddy(scale=0.9)
+                if big.data:
+                    big.set_halign(Gtk.Align.CENTER)
+                    page.set_paintable(None)
+                    parent.append(big)
             btn = Gtk.Button(label=self.T("Sync from GitHub"), halign=Gtk.Align.CENTER,
                              css_classes=["suggested-action", "pill"])
             btn.connect("clicked", lambda *_: self.sync())
@@ -2026,6 +2102,8 @@ class Grove(Adw.ApplicationWindow):
         path = self.project_dir(d)
         if not path:
             return
+        if cmd:
+            self.buddy_bar.react("run", f"Running {d['name']} in a terminal")
         term = shlex.split(self.settings["terminal"])
         flags = TERMINAL_FLAGS.get(os.path.basename(term[0]), ["-e"])
         # show what is being run and how it ended, and keep it on screen (a shell greeting like fastfetch would bury it)
@@ -2239,6 +2317,8 @@ class Grove(Adw.ApplicationWindow):
         return added
 
     def _busy(self, button, label, toast_text):
+        if button and hasattr(self, "buddy_bar"):
+            self.buddy_bar.react("busy", toast_text)
         if button:
             button.set_sensitive(False)
             child = button.get_child()
@@ -2413,10 +2493,10 @@ class Grove(Adw.ApplicationWindow):
         dlg.set_child(nav)
         dlg.connect("closed", lambda *_: (self.data.__setitem__("welcomed", True), self.save()))
 
-        def page(title, icon, text, widgets=(), buttons=()):
+        def page(title, icon, text, widgets=(), buttons=(), hero=None):
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, margin_top=12, margin_bottom=18,
                           margin_start=24, margin_end=24, valign=Gtk.Align.CENTER)
-            mascot = self.mascot(icon)
+            mascot = hero if hero is not None else self.mascot(icon)
             if mascot is not None:
                 box.append(mascot)
             else:
@@ -2462,10 +2542,12 @@ class Grove(Adw.ApplicationWindow):
                           "it also lists your private ones.",
                           widgets=[lst], buttons=[("Sync from GitHub", go, True), ("Skip", last, False)]))
 
+        hero = Buddy(scale=1.1, action="wave", fidget=False)
+        hero.set_halign(Gtk.Align.CENTER)
         nav.push(page("Welcome to Grove", "mascot:Treeyagi",
                       "Grove puts your GitHub projects in one tidy list. It can download, install and open them for you, "
                       "with one click, and keeps them up to date.",
-                      buttons=[("Show me how", second, True)]))
+                      buttons=[("Show me how", second, True)], hero=hero if hero.data else None))
         dlg.present(self)
 
     # ---- sharing a private repo (wizard) -----------------------------------
@@ -2662,9 +2744,12 @@ class Grove(Adw.ApplicationWindow):
                                 subtitle="Never import private repositories")
         rel_row = Adw.SwitchRow(title="Download releases", active=s.get("prefer_releases", True),
                                 subtitle="Install and Run get a repo's latest release when it has one, otherwise clone it")
+        buddy_row = Adw.SwitchRow(title="Show Treeyagi", active=s.get("buddy", True),
+                                  subtitle="The little animated buddy along the bottom: he reacts to downloads, wins and slip-ups")
         lst.append(user_row)
         lst.append(pub_row)
         lst.append(rel_row)
+        lst.append(buddy_row)
         dlg = Adw.AlertDialog(heading="Settings", extra_child=lst,
                               body=f"{FEATURED}'s public repos are always shown first. "
                                    "Add other GitHub users to follow their public repos too.")
@@ -2681,7 +2766,10 @@ class Grove(Adw.ApplicationWindow):
                 s["extra_users"] = list(dict.fromkeys(n for n in names if USERNAME.fullmatch(n)))
                 s["public_only"] = pub_row.get_active()
                 s["prefer_releases"] = rel_row.get_active()
+                s["buddy"] = buddy_row.get_active()
                 self.save()
+                self.lookup_action("buddy").set_state(GLib.Variant.new_boolean(s["buddy"]))
+                self.update_buddy()
                 self.sync()
         dlg.connect("response", resp)
         dlg.present(self)
@@ -2759,6 +2847,241 @@ def find_icon(d):
         except OSError:
             return None
     return p
+
+
+# ---- Treeyagi, the buddy ------------------------------------------------------------------------------
+# A little animated cartoon of the maker, along the bottom of the window. He carries the bees when something downloads,
+# cheers when it works, slumps when it doesn't, and naps when nothing happens. The art is one small atlas (buddy/atlas.png
+# and atlas.json in this repo, built by tools/make_buddy.py from the Treeyagi character pack); like the icons, Grove
+# downloads it once and keeps it in the cache. Without it, or with GdkPixbuf missing, he just isn't shown.
+BUDDY_URL = "https://raw.githubusercontent.com/Treeyagi/grove/main/buddy/{}"
+BUDDY_DIR = os.path.join(GLib.get_user_cache_dir(), "grove", "buddy", "v1")
+FIDGETS = ("stretch", "think", "wave", "dance_groove", "shrug")
+QUIPS = ("The bees are on it.", "Press the big button. I dare you.", "I'm basically a repo with legs.",
+         "Everything is a project if you stare long enough.", "Did somebody say install?", "Zero bugs. Probably.")
+FAIL_WORDS = ("couldn't", "could not", "failed", "didn't", "can't", "cannot", "error", "problem", "isn't on", "wrong")
+WIN_WORDS = ("downloaded", "cloned", "installed", "updated", "added ", "brought back", "already up to date")
+
+
+def buddy_mood(msg):
+    """What the buddy should do about a message Grove just showed: (reaction, text) or None.
+    'busy' for something in progress (it ends in an ellipsis), 'fail', 'gone' (removed something), or 'win'."""
+    m = (msg or "").strip()
+    low = m.lower()
+    if not m:
+        return None
+    if m.endswith("…") or m.endswith("..."):
+        return ("busy", m)
+    if any(w in low for w in FAIL_WORDS):
+        return ("fail", m)
+    if low.startswith(("removed ", "uninstalled ")):
+        return ("gone", m)
+    if low.startswith(WIN_WORDS):
+        return ("win", m)
+    return None
+
+
+def buddy_ready():
+    return valid_png(os.path.join(BUDDY_DIR, "atlas.png")) and os.path.isfile(os.path.join(BUDDY_DIR, "atlas.json"))
+
+
+_BUDDY = {}
+
+
+def buddy_data():
+    """(info, {action: [textures]}) for the cached atlas, or None. Loaded once per run."""
+    if "data" in _BUDDY:
+        return _BUDDY["data"]
+    data = None
+    if GdkPixbuf is not None and buddy_ready():
+        try:
+            with open(os.path.join(BUDDY_DIR, "atlas.json"), encoding="utf-8") as f:
+                info = json.load(f)
+            pb = GdkPixbuf.Pixbuf.new_from_file(os.path.join(BUDDY_DIR, "atlas.png"))
+            w, h = info["frameWidth"], info["frameHeight"]
+            frames = {name: [Gdk.Texture.new_for_pixbuf(pb.new_subpixbuf(i * w, a["row"] * h, w, h))
+                             for i in range(a["frames"])] for name, a in info["actions"].items()}
+            data = (info, frames)
+        except (OSError, ValueError, KeyError, GLib.Error):
+            data = None
+    _BUDDY["data"] = data
+    return data
+
+
+class Buddy(Gtk.Picture):
+    """One animated Treeyagi. play(name) runs an action; looping ones repeat, the others play once, hold their last frame
+    for a moment and go back to idle. Left alone he idles, now and then stretches or waves, and eventually naps."""
+
+    def __init__(self, scale=0.62, action="idle", fidget=True):
+        super().__init__(content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True, halign=Gtk.Align.START,
+                         valign=Gtk.Align.END, tooltip_text="Treeyagi")
+        data = buddy_data()
+        self.data, self.fidget, self.timer, self.fid_timer = data, fidget, 0, 0
+        self.name, self.i, self.loops, self.hold, self.then = action, 0, 0, 0, "idle"
+        self.touched = time.monotonic()
+        if not data:
+            self.set_visible(False)
+            return
+        info = data[0]
+        self.set_size_request(int(info["frameWidth"] * scale), int(info["frameHeight"] * scale))
+        self.animated = Gtk.Settings.get_default().get_property("gtk-enable-animations")
+        self.start_action = action
+        click = Gtk.GestureClick()
+        click.connect("pressed", lambda *_: self.on_click())
+        self.add_controller(click)
+        self.set_cursor_from_name("pointer")
+        self.connect("map", lambda *_: self.begin())
+        self.connect("unmap", lambda *_: self.stop())
+        self.show_frame()
+
+    # -- drawing and timing
+    def show_frame(self):
+        frames = self.data[1].get(self.name) or self.data[1]["idle"]
+        self.set_paintable(frames[min(self.i, len(frames) - 1)])
+
+    def begin(self):
+        self.stop()
+        if self.animated:
+            self.play(self.start_action)
+            if self.fidget:
+                self.fid_timer = GLib.timeout_add(random.randint(20000, 40000), self.fidget_tick)
+
+    def stop(self):
+        for t in (self.timer, self.fid_timer):
+            if t:
+                GLib.source_remove(t)
+        self.timer = self.fid_timer = 0
+
+    def play(self, name, loops=0, hold=1500, then="idle"):
+        """loops: 0 = repeat forever if the action loops, else once; n = n times. hold: ms to keep the last frame."""
+        if not self.data or name not in self.data[0]["actions"]:
+            return
+        if self.timer:
+            GLib.source_remove(self.timer)
+            self.timer = 0
+        self.name, self.i, self.loops, self.hold, self.then = name, 0, loops, hold, then
+        self.show_frame()
+        if self.animated and self.get_mapped():
+            self.timer = GLib.timeout_add(self.data[0]["actions"][name]["ms"][0], self.step)
+
+    def step(self):
+        a = self.data[0]["actions"][self.name]
+        self.i += 1
+        if self.i >= a["frames"]:
+            if a["loop"] and self.loops == 0:
+                self.i = 0
+            elif self.loops > 1:
+                self.loops -= 1
+                self.i = 0
+            else:
+                self.i = a["frames"] - 1
+                self.show_frame()
+                self.timer = GLib.timeout_add(self.hold if a["hold"] else 50, self.finish)
+                return False
+        self.show_frame()
+        self.timer = GLib.timeout_add(a["ms"][self.i], self.step)
+        return False
+
+    def finish(self):
+        self.timer = 0
+        self.play(self.then)
+        return False
+
+    # -- what he does on his own
+    def poke(self):
+        """Something happened: he's awake."""
+        was_asleep = self.name == "nap"
+        self.touched = time.monotonic()
+        if was_asleep:
+            self.play("stretch")
+
+    def fidget_tick(self):
+        if self.name == "idle":
+            if time.monotonic() - self.touched > 150:
+                self.play("nap")
+            else:
+                self.play(random.choice(FIDGETS), loops=2)
+        self.fid_timer = GLib.timeout_add(random.randint(20000, 40000), self.fidget_tick)
+        return False
+
+    def on_click(self):
+        self.poke()
+        self.play("dance_disco", loops=3)
+        win = self.get_root()
+        if hasattr(win, "buddy_bar"):
+            win.buddy_bar.say(random.choice(QUIPS), 5)
+
+
+class BuddyBar(Gtk.Box):
+    """The strip along the bottom of the window: Treeyagi and a speech bubble with what he's doing."""
+
+    def __init__(self):
+        super().__init__(spacing=10, css_classes=["buddy-bar"], valign=Gtk.Align.END)
+        self.buddy = Buddy()
+        self.append(self.buddy)
+        self.label = Gtk.Label(wrap=True, xalign=0, halign=Gtk.Align.START, max_width_chars=60, css_classes=["buddy-bubble"])
+        self.bubble = Gtk.Revealer(child=self.label, transition_type=Gtk.RevealerTransitionType.CROSSFADE,
+                                   valign=Gtk.Align.CENTER, hexpand=True, reveal_child=False)
+        self.append(self.bubble)
+        self.say_timer = self.busy_timer = 0
+
+    def refresh(self):
+        """The art arrived after the bar was built: swap in a Buddy that has it."""
+        if self.buddy.data or not buddy_data():
+            return
+        old = self.buddy
+        self.buddy = Buddy()
+        self.remove(old)
+        self.prepend(self.buddy)
+
+    def say(self, text, secs=6):
+        if self.say_timer:
+            GLib.source_remove(self.say_timer)
+            self.say_timer = 0
+        self.label.set_label(text)
+        self.bubble.set_reveal_child(bool(text))
+        if text and secs:
+            self.say_timer = GLib.timeout_add_seconds(secs, self._hush)
+
+    def _hush(self):
+        self.say_timer = 0
+        self.bubble.set_reveal_child(False)
+        return False
+
+    def react(self, kind, text=""):
+        b = self.buddy
+        if not b.data:
+            return
+        b.poke()
+        if self.busy_timer:
+            GLib.source_remove(self.busy_timer)
+            self.busy_timer = 0
+        if kind == "busy":
+            low = text.lower()
+            b.play("think" if low.startswith(("fetching", "looking", "reading", "checking")) else "bee_carry")
+            self.say(text, 0)
+            self.busy_timer = GLib.timeout_add_seconds(120, self.calm)   # never stuck carrying forever
+        elif kind == "win":
+            b.play("victory", hold=2200)
+            self.say(text, 5)
+        elif kind == "fail":
+            b.play("sad_slump", hold=3500)
+            self.say(text, 8)
+        elif kind == "gone":
+            b.play("faint", hold=2500)
+            self.say(text, 5)
+        elif kind == "run":
+            b.play("lever_pull", hold=1500)
+            self.say(text, 4)
+        elif kind == "hello":
+            b.play("wave", loops=3)
+            self.say(text, 5)
+
+    def calm(self):
+        self.busy_timer = 0
+        self.buddy.play("idle")
+        self.say("")
+        return False
 
 
 class App(Adw.Application):

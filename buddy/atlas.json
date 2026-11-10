@@ -1,0 +1,198 @@
+{
+ "frameWidth": 120,
+ "frameHeight": 145,
+ "actions": {
+  "idle": {
+   "row": 0,
+   "frames": 4,
+   "ms": [
+    700,
+    233,
+    117,
+    450
+   ],
+   "loop": true,
+   "hold": false
+  },
+  "wave": {
+   "row": 1,
+   "frames": 4,
+   "ms": [
+    167,
+    167,
+    167,
+    167
+   ],
+   "loop": true,
+   "hold": false
+  },
+  "victory": {
+   "row": 2,
+   "frames": 4,
+   "ms": [
+    167,
+    167,
+    167,
+    167
+   ],
+   "loop": false,
+   "hold": true
+  },
+  "sad_slump": {
+   "row": 3,
+   "frames": 4,
+   "ms": [
+    167,
+    167,
+    167,
+    167
+   ],
+   "loop": false,
+   "hold": true
+  },
+  "shrug": {
+   "row": 4,
+   "frames": 4,
+   "ms": [
+    167,
+    167,
+    167,
+    167
+   ],
+   "loop": false,
+   "hold": true
+  },
+  "think": {
+   "row": 5,
+   "frames": 4,
+   "ms": [
+    167,
+    167,
+    167,
+    167
+   ],
+   "loop": true,
+   "hold": false
+  },
+  "nap": {
+   "row": 6,
+   "frames": 4,
+   "ms": [
+    400,
+    400,
+    400,
+    400
+   ],
+   "loop": true,
+   "hold": false
+  },
+  "bee_carry": {
+   "row": 7,
+   "frames": 4,
+   "ms": [
+    167,
+    167,
+    167,
+    167
+   ],
+   "loop": true,
+   "hold": false
+  },
+  "dance_disco": {
+   "row": 8,
+   "frames": 4,
+   "ms": [
+    167,
+    167,
+    167,
+    167
+   ],
+   "loop": true,
+   "hold": false
+  },
+  "dance_groove": {
+   "row": 9,
+   "frames": 4,
+   "ms": [
+    167,
+    167,
+    167,
+    167
+   ],
+   "loop": true,
+   "hold": false
+  },
+  "faint": {
+   "row": 10,
+   "frames": 4,
+   "ms": [
+    133,
+    200,
+    250,
+    417
+   ],
+   "loop": false,
+   "hold": true
+  },
+  "lever_pull": {
+   "row": 11,
+   "frames": 4,
+   "ms": [
+    167,
+    167,
+    167,
+    167
+   ],
+   "loop": false,
+   "hold": true
+  },
+  "stretch": {
+   "row": 12,
+   "frames": 4,
+   "ms": [
+    167,
+    167,
+    167,
+    167
+   ],
+   "loop": false,
+   "hold": true
+  },
+  "talk": {
+   "row": 13,
+   "frames": 4,
+   "ms": [
+    167,
+    167,
+    167,
+    167
+   ],
+   "loop": true,
+   "hold": false
+  },
+  "meditate": {
+   "row": 14,
+   "frames": 4,
+   "ms": [
+    400,
+    400,
+    400,
+    400
+   ],
+   "loop": true,
+   "hold": false
+  },
+  "hurt": {
+   "row": 15,
+   "frames": 4,
+   "ms": [
+    50,
+    83,
+    100,
+    67
+   ],
+   "loop": false,
+   "hold": true
+  }
+ }
+}

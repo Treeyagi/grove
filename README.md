@@ -90,6 +90,14 @@ Grove draws with GTK's plain CPU renderer by default, which keeps it around 90 M
 
 Every project gets an icon in the list and on its page. Grove picks, in order: your own `~/.config/grove/icons/<name>.svg` (or `.png`), an `icon`/`logo`/`<name>` image in the project's folder, the cartoon mascot for the repos it knows by name (downloaded once from this repo's [`icons/`](icons) folder and kept in the cache), the older built-in drawing of it if you're offline, then a coloured tile with the first letter. The mascots were made with Canva.
 
+## Treeyagi, the buddy
+
+A little animated cartoon of the maker lives in a strip along the bottom of the window. He waves hello, carries a swarm
+of bees while something downloads, cheers when it works, slumps when it doesn't, flops over when you uninstall something,
+dances (and says something silly) when you click him, and naps if you leave him alone. He also waves from the welcome tour
+and the empty home screen. Turn him off in ☰ > *Show Treeyagi* or in Settings. He needs nothing installed: the art is
+downloaded once, and without it (or without GdkPixbuf) he just isn't shown.
+
 ## Look
 
 Grove has a warm look (cream and cocoa with a coral accent, rounded cards, a friendly round font if Nunito or Quicksand is installed) that follows your system's light or dark setting. The hacker-movie theme is still one switch away in the menu.
