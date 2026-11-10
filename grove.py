@@ -688,6 +688,27 @@ def detect_commands(path):
     return install, run
 
 
+_GH_SEEN = [0.0, False]
+
+
+def gh_ready():
+    """Is the GitHub CLI installed AND signed in (or given GH_TOKEN)? A gh that has never been signed in fails on every
+    command, even for public repos, with 'run gh auth login / populate GH_TOKEN'; then Grove uses curl and git instead.
+    Asked with `gh auth status` (the same check gh does before any command; no token is read or shown) and remembered for
+    30 seconds, so signing in while Grove is open is noticed."""
+    if not shutil.which("gh"):
+        return False
+    now = time.monotonic()
+    if now - _GH_SEEN[0] > 30:
+        try:
+            ok = subprocess.run(["gh", "auth", "status", "--hostname", "github.com"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                stdin=subprocess.DEVNULL, timeout=15).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        _GH_SEEN[0], _GH_SEEN[1] = now, ok
+    return _GH_SEEN[1]
+
+
 def spawn(argv, cwd=None):
     """Start a detached process; return an error string or None."""
     try:
@@ -1584,7 +1605,7 @@ class Grove(Adw.ApplicationWindow):
             self.run_async(["curl", "-fsSL", "-H", "Accept: application/vnd.github.raw+json",
                             f"https://api.github.com/repos/{slug}/readme"], done, slug=slug)
 
-        if not shutil.which("gh"):
+        if not gh_ready():
             public_api()
             return
 
@@ -2101,7 +2122,7 @@ class Grove(Adw.ApplicationWindow):
 
     def sync_mine(self):
         """The signed-in gh account's own repos (private ones too, unless public-only)."""
-        if not shutil.which("gh"):
+        if not gh_ready():
             self.finish_sync()
             return
         argv = ["gh", "repo", "list", "--limit", "500", "--json", self.REPO_FIELDS]   # always your own login, never the shared token
@@ -2253,7 +2274,7 @@ class Grove(Adw.ApplicationWindow):
 
     def latest_release(self, slug, cb):
         """cb(release or None): the repo's latest release as {tag, assets}, using gh if there is one."""
-        if shutil.which("gh"):
+        if gh_ready():
             argv = ["gh", "release", "view", "--repo", slug, "--json", "tagName,assets"]
         else:
             argv = ["curl", "-fsSL", "-H", "Accept: application/vnd.github+json",
@@ -2276,7 +2297,7 @@ class Grove(Adw.ApplicationWindow):
         slug = repo_slug(d["url"])
         tmp = tempfile.mkdtemp(prefix="grove-")
         out = os.path.join(tmp, asset["name"])
-        if shutil.which("gh"):
+        if gh_ready():
             argv = ["gh", "release", "download", rel["tag"], "--repo", slug, "--pattern", asset["name"],
                     "--dir", tmp, "--clobber"]
         else:
@@ -2315,7 +2336,7 @@ class Grove(Adw.ApplicationWindow):
     def _git_clone(self, d, button, tag, then):
         path = os.path.expanduser(d["path"])
         self._busy(button, "Cloning…", f"Cloning {d['name']}…")
-        if shutil.which("gh"):
+        if gh_ready():
             argv = ["gh", "repo", "clone", d["url"], path] + (["--", "--branch", tag] if tag else [])
         else:
             argv = ["git", "clone"] + (["--branch", tag] if tag else []) + [d["url"], path]
