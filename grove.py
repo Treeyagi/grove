@@ -1373,46 +1373,45 @@ class Grove(Adw.ApplicationWindow):
         self.detail.set_child(page)
 
     def empty_page(self):
-        if True:
-            hack = self.settings["hackers"]
-            page = Adw.StatusPage(
-                title="ACCESS GRANTED" if hack else "Grove",
-                description="Select a target from the tree, or jack into GitHub to pull your repos."
-                if hack else "Your GitHub projects, all in one cosy list. Grove installs and opens them for you. "
-                             "Press the button to bring your repos in, then tap one.")
-            if hack:
-                page.set_paintable(None)
-                box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, halign=Gtk.Align.CENTER)
-                logo = self.logo(112)
-                if logo:
-                    box.append(logo)
-                box.append(Gtk.Label(label=BANNER, css_classes=["banner"], selectable=False))
-                box.append(Gtk.Label(label="H A C K   T H E   P L A N E T", css_classes=["tagline"]))
-                page.set_child(box)
-                parent = box
+        hack = self.settings["hackers"]
+        page = Adw.StatusPage(
+            title="ACCESS GRANTED" if hack else "Grove",
+            description="Select a target from the tree, or jack into GitHub to pull your repos."
+            if hack else "Your GitHub projects, all in one cosy list. Grove installs and opens them for you. "
+                         "Press the button to bring your repos in, then tap one.")
+        if hack:
+            page.set_paintable(None)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, halign=Gtk.Align.CENTER)
+            logo = self.logo(112)
+            if logo:
+                box.append(logo)
+            box.append(Gtk.Label(label=BANNER, css_classes=["banner"], selectable=False))
+            box.append(Gtk.Label(label="H A C K   T H E   P L A N E T", css_classes=["tagline"]))
+            page.set_child(box)
+            parent = box
+        else:
+            tex = self.icon_for({"id": "mascot-grove", "name": "grove", "path": ""})
+            if tex is not None:
+                page.set_paintable(tex)
             else:
-                tex = self.icon_for({"id": "mascot-grove", "name": "grove", "path": ""})
-                if tex is not None:
-                    page.set_paintable(tex)
-                else:
-                    page.set_icon_name(ICON_NAME if Gtk.IconTheme.get_for_display(self.get_display()).has_icon(ICON_NAME)
-                                       else "folder-symbolic")
-                parent = Gtk.Box(halign=Gtk.Align.CENTER)
-                page.set_child(parent)
-                big = Buddy(scale=0.9)
-                if big.data:
-                    big.set_halign(Gtk.Align.CENTER)
-                    page.set_paintable(None)
-                    parent.append(big)
-            btn = Gtk.Button(label=self.T("Sync from GitHub"), halign=Gtk.Align.CENTER,
-                             css_classes=["suggested-action", "pill"])
-            btn.connect("clicked", lambda *_: self.sync())
-            parent.set_orientation(Gtk.Orientation.VERTICAL) if isinstance(parent, Gtk.Box) else None
-            parent.set_spacing(8) if isinstance(parent, Gtk.Box) else None
-            parent.append(btn)
-            tour = Gtk.Button(label=self.T("How does this work?"), halign=Gtk.Align.CENTER, css_classes=["flat"])
-            tour.connect("clicked", lambda *_: self.show_welcome())
-            parent.append(tour)
+                page.set_icon_name(ICON_NAME if Gtk.IconTheme.get_for_display(self.get_display()).has_icon(ICON_NAME)
+                                   else "folder-symbolic")
+            parent = Gtk.Box(halign=Gtk.Align.CENTER)
+            page.set_child(parent)
+            big = Buddy(scale=0.9)
+            if big.data:
+                big.set_halign(Gtk.Align.CENTER)
+                page.set_paintable(None)
+                parent.append(big)
+        btn = Gtk.Button(label=self.T("Sync from GitHub"), halign=Gtk.Align.CENTER,
+                         css_classes=["suggested-action", "pill"])
+        btn.connect("clicked", lambda *_: self.sync())
+        parent.set_orientation(Gtk.Orientation.VERTICAL) if isinstance(parent, Gtk.Box) else None
+        parent.set_spacing(8) if isinstance(parent, Gtk.Box) else None
+        parent.append(btn)
+        tour = Gtk.Button(label=self.T("How does this work?"), halign=Gtk.Align.CENTER, css_classes=["flat"])
+        tour.connect("clicked", lambda *_: self.show_welcome())
+        parent.append(tour)
         return page
 
     def entry(self, title, d, key, node=None):
