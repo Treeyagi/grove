@@ -37,14 +37,16 @@ opens them with one big button. GitHub: Treeyagi/grove (public). Desktop first; 
   Selecting a project sets `show-content`; back clears the selection. Groups are section headings that fold on tap;
   their ⋯ button opens the group page via `open_group()`.
 - Icons, first match wins: `~/.config/grove/icons/<name>.svg|png`, an icon/logo/`<name>` image in the project folder,
-  `BUILTIN_ICONS[name.lower()]`, then a coloured letter tile. Built-ins are cached under `~/.cache/grove/icons/`.
+  the Canva mascot PNG (repo `icons/<name>.png`, listed in `NEW_ICONS`, fetched once by `fetch_new_icons` into `~/.cache/grove/icons/v2/`),
+  `BUILTIN_ICONS[name.lower()]` (the offline fallback), then a coloured letter tile.
+  To add or change a mascot: put the PNG in `icons/`, add its name to `NEW_ICONS`, and bump `NEW_ICON_DIR` (`v3`) if an existing one changed. Built-ins are cached under `~/.cache/grove/icons/`.
 - Private repos: a pasted fine-grained token (`settings.token`, `token_owner`) is used only for that owner's repos.
   `run_async(argv, cb, slug=...)` injects it through `GH_TOKEN`, git's env config, or a 0600 curl config file, never argv.
   Never print or paste a token in chat.
 - RAM: `GSK_RENDERER=cairo` is set before GTK starts (about 90 MB instead of about 240 MB). Keep it unless asked.
 
 ## Check your work
-- `python3 tests/test_releases.py` and `python3 tests/test_uninstall.py` (offline) must each end with `ALL OK`. Add a `check(...)` for new pure helpers.
+- `python3 tests/test_releases.py` and `python3 tests/test_uninstall.py` and `python3 tests/test_icons.py` (offline) must each end with `ALL OK`. Add a `check(...)` for new pure helpers.
 - Headless UI checks: build the window in a script, drive it with `GLib.timeout_add`, then quit. **Set a distinct
   `g.APP_ID`** before `g.App()`, otherwise GTK hands off to the user's running Grove and your script silently does nothing.
   Point `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` at a temp dir, and copy `config.json` there if you want real projects

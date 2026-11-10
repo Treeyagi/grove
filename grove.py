@@ -943,6 +943,7 @@ class Grove(Adw.ApplicationWindow):
         self.rebuild()
         GLib.idle_add(self.auto_sync)
         GLib.idle_add(self.prefetch_readmes)
+        GLib.timeout_add(1500, self.fetch_new_icons)
         GLib.idle_add(self.check_all_sites)
 
     def _on_search(self, entry):
@@ -1108,6 +1109,38 @@ class Grove(Adw.ApplicationWindow):
         name = spec.split(":", 1)[1]
         tex = self.icon_for({"id": "mascot-" + name, "name": name, "path": ""})
         return Gtk.Image(paintable=tex, pixel_size=size, halign=Gtk.Align.CENTER) if tex else None
+
+    def fetch_new_icons(self):
+        """Download the mascots that aren't cached yet, one curl each. When the last one lands, redraw the list."""
+        missing = [n for n in NEW_ICONS if not new_icon_path(n)]
+        if not missing:
+            return False
+        try:
+            os.makedirs(NEW_ICON_DIR, exist_ok=True)
+        except OSError:
+            return False
+        left = [len(missing)]
+        got = [0]
+
+        def one(name):
+            tmp = os.path.join(NEW_ICON_DIR, name + ".part")
+
+            def done(proc, _out, _err):
+                if proc.get_exit_status() == 0 and valid_png(tmp):
+                    os.replace(tmp, os.path.join(NEW_ICON_DIR, name + ".png"))
+                    got[0] += 1
+                else:
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+                left[0] -= 1
+                if left[0] == 0 and got[0]:
+                    self.rebuild()
+            self.run_async(["curl", "-fsSL", "--max-time", "30", "-o", tmp, NEW_ICON_URL.format(name)], done)
+        for n in missing:
+            one(n)
+        return False
 
     def icon_for(self, d):
         """The project's icon as a texture, or None. Looked up once per project and kept until the next rebuild."""
@@ -2652,9 +2685,36 @@ BUILTIN_ICONS = {
 ICON_DIR_USER = os.path.join(GLib.get_user_config_dir(), "grove", "icons")
 ICON_CACHE = os.path.join(GLib.get_user_cache_dir(), "grove", "icons")
 
+# The cartoon-mascot set made with Canva lives in this repo's icons/ folder. Grove downloads each one once, keeps it in the
+# cache, and uses it in place of the built-in drawing; with no network the built-in one still shows.
+NEW_ICON_URL = "https://raw.githubusercontent.com/Treeyagi/grove/main/icons/{}.png"
+NEW_ICON_DIR = os.path.join(ICON_CACHE, "v2")
+NEW_ICONS = ("adhd-frenzy", "banana-manager-tools", "cachyos-live-wallpapers", "desktop-buddy", "grove", "medllm",
+             "mission-control", "soundlink-flex-usb-linux", "spare", "trees-infamous-app", "treeyagi")
+
+
+def valid_png(path):
+    """A real PNG of a sane size (a half-downloaded file or an error page is not)."""
+    try:
+        if not 1000 < os.path.getsize(path) < 2_000_000:
+            return False
+        with open(path, "rb") as f:
+            return f.read(8) == b"\x89PNG\r\n\x1a\n"
+    except OSError:
+        return False
+
+
+def new_icon_path(name):
+    """The downloaded mascot for a project name, or None if it isn't here (yet)."""
+    if name not in NEW_ICONS:
+        return None
+    p = os.path.join(NEW_ICON_DIR, name + ".png")
+    return p if valid_png(p) else None
+
 
 def find_icon(d):
-    """Path to the best icon file for a project, or None: yours, the project's own, then the built-in one."""
+    """Path to the best icon file for a project, or None: yours, the project's own, the downloaded mascot, then the
+    built-in drawing."""
     name = d["name"].lower()
     for ext in (".svg", ".png"):
         p = os.path.join(ICON_DIR_USER, name + ext)
@@ -2663,6 +2723,9 @@ def find_icon(d):
     own = project_icon(d)
     if own:
         return own
+    new = new_icon_path(name)
+    if new:
+        return new
     svg = BUILTIN_ICONS.get(name)
     if not svg:
         return None

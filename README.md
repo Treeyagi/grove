@@ -88,7 +88,7 @@ Grove draws with GTK's plain CPU renderer by default, which keeps it around 90 M
 
 ## Project icons
 
-Every project gets an icon in the list and on its page. Grove picks, in order: your own `~/.config/grove/icons/<name>.svg` (or `.png`), an `icon`/`logo`/`<name>` image in the project's folder, a built-in funny icon for the repos it knows by name, then a coloured tile with the first letter.
+Every project gets an icon in the list and on its page. Grove picks, in order: your own `~/.config/grove/icons/<name>.svg` (or `.png`), an `icon`/`logo`/`<name>` image in the project's folder, the cartoon mascot for the repos it knows by name (downloaded once from this repo's [`icons/`](icons) folder and kept in the cache), the older built-in drawing of it if you're offline, then a coloured tile with the first letter. The mascots were made with Canva.
 
 ## Look
 
