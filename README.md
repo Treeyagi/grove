@@ -55,6 +55,9 @@ First launch shows a short welcome tour (reopen it from the menu). Tap a project
 - **Updates.** A project Grove downloaded from a release shows an **Update to vX** button when a newer release
   exists. An update puts the new one in the same folder and keeps the old one beside it (`name.old-<time>`);
   source releases switch to the new tag.
+  A plain git clone (a repo with no releases) checks GitHub when you open it, and again a minute after the
+  last check, and shows **Update (N new commits)**. It only fast-forwards a clean copy on the main branch (or one left
+  on a detached commit that is already on GitHub). Uncommitted changes, other branches and local commits are never touched.
 - **Remove** a repo with the trash button under the tree, the Delete key, or the button on its page. Grove asks first,
   and for a clone it can also delete the local copy (only a git checkout of that exact repo, with a warning if it
   has uncommitted changes). Removed repos stay gone after a sync; ☰ → *Bring back removed repos* undoes it.

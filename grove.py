@@ -728,6 +728,50 @@ def spawn(argv, cwd=None):
     return None
 
 
+# ---- plain git clones: how far behind GitHub are they? ------------------------------------------
+def _git(path, *args):
+    """Run git in path (local commands only, fast). Returns (exit code, stdout, stderr)."""
+    try:
+        p = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, timeout=20)
+        return p.returncode, p.stdout.strip(), p.stderr.strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, "", str(e)
+
+
+def git_behind_count(path):
+    """How many commits GitHub's default branch (origin/HEAD) has that this clone does not, or None if it can't
+    be told (not a git folder, no origin/HEAD, a fetch has never happened)."""
+    if not os.path.isdir(os.path.join(path, ".git")):
+        return None
+    code, out, _ = _git(path, "rev-list", "--count", "HEAD..origin/HEAD")
+    return int(out) if code == 0 and out.isdigit() else None
+
+
+def git_fast_forward(path):
+    """Bring a clean clone up to GitHub's default branch without ever losing work. Returns (ok, message).
+    Refuses when there are uncommitted changes, when the clone is on some other branch, or when it would not be a
+    plain fast-forward. A clone left on a detached commit is put back on the default branch first."""
+    if _git(path, "status", "--porcelain")[1]:
+        return False, "It has changes you haven't saved. Commit or stash them first."
+    code, ref, _ = _git(path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    if code != 0 or "/" not in ref:
+        return False, "Couldn't tell which branch is the main one."
+    branch = ref.split("/", 1)[1]
+    code, cur, _ = _git(path, "symbolic-ref", "-q", "--short", "HEAD")
+    if code != 0:   # detached: only step onto the branch when everything here is already in it
+        if _git(path, "merge-base", "--is-ancestor", "HEAD", ref)[0] != 0:
+            return False, "This copy has commits that aren't on GitHub, so it was left alone."
+        code, _o, err = _git(path, "checkout", "-q", branch)
+        if code != 0:
+            return False, err.splitlines()[-1] if err else "Couldn't switch to " + branch
+    elif cur != branch:
+        return False, f"It is on the branch '{cur}', not '{branch}', so it was left alone."
+    code, _o, err = _git(path, "merge", "--ff-only", "-q", ref)
+    if code != 0:
+        return False, "Couldn't fast-forward: " + (err.splitlines()[-1] if err else "it has diverged from GitHub")
+    return True, "Updated to the latest on " + branch
+
+
 def repo_slug(url):
     m = re.match(r"https?://github\.com/([^/]+/[^/#?]+?)(?:\.git)?/?$", url or "")
     return m.group(1) if m else None
@@ -884,6 +928,8 @@ class Grove(Adw.ApplicationWindow):
         self.load()
         self.update_checked = set()   # projects already asked about a newer release this session
         self.latest_tags = {}         # project id -> the newer release found
+        self.git_behind = {}          # project id -> commits a plain git clone is behind GitHub
+        self.git_checked = {}         # project id -> when it was last asked (checked again after a minute)
         self.sel = None
         self.expanded = set(self.data.get("expanded", []))
         self.query = ""
@@ -1494,8 +1540,17 @@ class Grove(Adw.ApplicationWindow):
                             css_classes=["pill"], halign=Gtk.Align.CENTER, margin_top=4)
             up.connect("clicked", lambda b: self.update_release(d, b))
             hero.append(up)
+        elif here and not rel and self.git_behind.get(d["id"]):
+            n = self.git_behind[d["id"]]
+            up = Gtk.Button(child=Adw.ButtonContent(icon_name="software-update-available-symbolic",
+                                                    label=f"Update ({n} new commit{'s' if n != 1 else ''})"),
+                            css_classes=["pill"], halign=Gtk.Align.CENTER, margin_top=4)
+            up.connect("clicked", lambda b: self.update_git(d, b))
+            hero.append(up)
         elif rel and here:
             GLib.idle_add(self.check_update, d)
+        elif here and d["url"]:
+            GLib.idle_add(self.check_git_update, d)
         page.add(hero)
 
         # what is it?
@@ -2446,6 +2501,46 @@ class Grove(Adw.ApplicationWindow):
                 self.latest_tags[d["id"]] = rel
                 self._refresh_if_current(d)
         self.latest_release(slug, got)
+
+    def check_git_update(self, d):
+        """A plain git clone has no release to compare, so ask GitHub whether its main branch moved on. Asks again
+        when the project is reopened more than a minute later, so a fresh push shows up without restarting Grove."""
+        slug = repo_slug(d["url"])
+        path = os.path.expanduser(d["path"] or "")
+        if not (slug and path and os.path.isdir(os.path.join(path, ".git"))):
+            return
+        now = time.time()
+        if now - self.git_checked.get(d["id"], 0) < 60:
+            return
+        self.git_checked[d["id"]] = now
+
+        def fetched(proc, _o, _e):
+            if proc.get_exit_status() != 0:
+                return
+            n = git_behind_count(path) or 0
+            if n != self.git_behind.get(d["id"], 0):
+                self.git_behind[d["id"]] = n
+                self._refresh_if_current(d)
+        self.run_async(["git", "-C", path, "fetch", "--quiet", "origin"], fetched, slug=slug)
+
+    def update_git(self, d, button=None):
+        path = os.path.expanduser(d["path"])
+        self._busy(button, "Updating…", f"Updating {d['name']}…")
+
+        def fetched(proc, _o, err):
+            if proc.get_exit_status() != 0:
+                lines = (err or "").strip().splitlines()
+                self.toast(lines[-1] if lines else "Couldn't reach GitHub")
+            else:
+                ok, msg = git_fast_forward(path)
+                self.toast(f"{d['name']}: {msg}")
+                if ok:
+                    self.git_behind.pop(d["id"], None)
+                    self.fill_missing(d)
+            self.git_checked.pop(d["id"], None)
+            self.save()
+            self.rebuild(d["id"])
+        self.run_async(["git", "-C", path, "fetch", "--quiet", "origin"], fetched, slug=repo_slug(d["url"]))
 
     def update_release(self, d, button=None):
         rel = self.latest_tags.get(d["id"])

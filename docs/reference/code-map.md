@@ -11,6 +11,7 @@ and the function names below: `grep -n "def pick_asset\|# ---- releases" grove.p
 | `release_run`, `readme_commands`, `_deps_step`, `detect_commands` | Working out the install and run commands for a folder |
 | `# ---- sharing private repos with a token`: `looks_like_token`, `write_curl_auth`, `summarize_token`, `rest_repo` | Token handling for private repos |
 | `is_installed_copy`, `update_available`, `write_update` | Self-update, behind the header update icon |
+| `git_behind_count`, `git_fast_forward`, `check_git_update`, `update_git` | Updating plain git clones (no release): how far behind GitHub, and a safe fast-forward |
 | `class Column`, `grad_class`, `project_icon`, `find_icon`, `BUILTIN_ICONS` | Page layout helper and the icons |
 | `class Grove` / `rebuild`, `_selected`, `open_group`, `_on_back` | Home list and navigation |
 | `# ---- detail pane`: `show_detail`, `empty_page`, `project_page`, `big_icon` | A project's page, with the one big button |
