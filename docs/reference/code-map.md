@@ -12,6 +12,9 @@ and the function names below: `grep -n "def pick_asset\|# ---- releases" grove.p
 | `# ---- sharing private repos with a token`: `looks_like_token`, `write_curl_auth`, `summarize_token`, `rest_repo` | Token handling for private repos |
 | `is_installed_copy`, `update_available`, `write_update` | Self-update, behind the header update icon |
 | `git_behind_count`, `git_fast_forward`, `check_git_update`, `update_git` | Updating plain git clones (no release): how far behind GitHub, and a safe fast-forward |
+| `# ---- tags, smart groups, fuzzy search...`: `parse_tags`, `fuzzy_score`, `launcher_matches`, `resolve_project`, `parse_github_url`, `smart_groups`, `record_run` | Pure helpers (tested in `tests/test_smart.py`) |
+| `smart_items`, `show_launcher`, `sync_starred`, `_drop_on_row`, `_drop_link`, `add_repo` | Smart groups, Ctrl+K launcher, Wishlist import, drag and drop |
+| `cli_main`, `class App` / `do_command_line` | `grove run/list` with no window, and `--quick` reaching a running window |
 | `class Column`, `grad_class`, `project_icon`, `find_icon`, `BUILTIN_ICONS` | Page layout helper and the icons |
 | `class Grove` / `rebuild`, `_selected`, `open_group`, `_on_back` | Home list and navigation |
 | `# ---- detail pane`: `show_detail`, `empty_page`, `project_page`, `big_icon` | A project's page, with the one big button |

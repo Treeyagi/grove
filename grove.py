@@ -35,6 +35,8 @@ ICON_NAME = "io.github.grove.Launcher"  # the wizard-tree icon installed by inst
 CONFIG = os.path.join(GLib.get_user_config_dir(), "grove", "config.json")
 CACHE_DIR = os.path.join(GLib.get_user_cache_dir(), "grove", "readmes")
 INBOX = "Unsorted"
+WISHLIST = "Wishlist"   # your GitHub stars, imported by menu > Import starred repos
+RUNS = os.path.join(os.path.dirname(CONFIG), "runs.json")   # project id -> when Grove last launched it
 FEATURED = "Treeyagi"  # always synced and pinned first, for everyone
 SELF_URL = "https://raw.githubusercontent.com/Treeyagi/grove/main/grove.py"
 INSTALLED = os.path.join(GLib.get_user_data_dir(), "grove", "grove.py")   # where install.sh puts it
@@ -184,6 +186,7 @@ listview.home-list > row { transition: background 160ms ease; }
 listview.home-list > row:hover { background-color: alpha(@accent_bg_color, 0.12); }
 listview.home-list > row:selected { background-color: alpha(@accent_bg_color, 0.22); }
 searchentry.pill-search { background-color: @card_bg_color; box-shadow: 0 1px 6px alpha(#6b3f22, 0.14); }
+.drop-hover { background-color: alpha(@accent_bg_color, 0.25); border-radius: 12px; }
 .section-title { color: @accent_color; opacity: 1; letter-spacing: 0.6px; }
 .hero-title { color: @window_fg_color; }
 .app-icon.big { box-shadow: 0 10px 26px alpha(#6b3f22, 0.30); }
@@ -227,6 +230,128 @@ def walk(items, parent=None):
         yield d, items, parent
         if d["type"] == "group":
             yield from walk(d["children"], d)
+
+
+# ---- tags, smart groups, fuzzy search, URLs, launch history -----------------
+SMART_ROOT = "smart:root"
+
+
+def parse_tags(text):
+    """'CLI, #game  wip' -> ['cli', 'game', 'wip']: lower-case, no '#', no repeats."""
+    out = []
+    for t in re.split(r"[,\s]+", text or ""):
+        t = t.strip().lstrip("#").lower()
+        if t and t not in out:
+            out.append(t)
+    return out
+
+
+def fuzzy_score(query, text):
+    """How well `query` matches `text` (higher is better), or None. A plain substring beats letters that merely
+    appear in order; matches at the start of a word and runs of consecutive letters score extra."""
+    q, t = (query or "").lower(), (text or "").lower()
+    if not q:
+        return 0
+    if q in t:
+        return 1000 - t.index(q) * 5 - len(t) * 0.1
+    pos, score, last = 0, 0, -2
+    for ch in q:
+        j = t.find(ch, pos)
+        if j < 0:
+            return None
+        score += 10 + (15 if j == last + 1 else 0) + (10 if j == 0 or t[j - 1] in " -_./" else 0)
+        last, pos = j, j + 1
+    return min(score, 900) - len(t) * 0.1
+
+
+def launcher_matches(projects, query, runs, installed, limit=30):
+    """Projects for the quick launcher, best first. No query: what you use most recently, installed ones first.
+    Otherwise the name matters most; tags, language and description count a little."""
+    query = (query or "").strip()
+    scored = []
+    for d in projects:
+        if not query:
+            scored.append((0, d))
+            continue
+        best = fuzzy_score(query, d["name"])
+        for extra in (" ".join(d.get("tags", [])), d.get("language", ""), d.get("description", "")):
+            sc = fuzzy_score(query, extra)
+            if sc is not None:
+                best = max(best if best is not None else -1e9, sc * 0.3)
+        if best is not None:
+            scored.append((best, d))
+    scored.sort(key=lambda t: (-t[0], not installed(t[1]), -runs.get(t[1]["id"], 0), t[1]["name"].lower()))
+    return [d for _, d in scored[:limit]]
+
+
+def resolve_project(projects, name):
+    """The project a command-line name means: exact name first, then the best fuzzy match. Returns (project, others)
+    where others are rivals that matched about as well (so the caller can say it was ambiguous)."""
+    name = (name or "").strip().lower()
+    for d in projects:
+        if d["name"].lower() == name:
+            return d, []
+    scored = sorted(((fuzzy_score(name, d["name"]), d) for d in projects if fuzzy_score(name, d["name"]) is not None),
+                    key=lambda t: (-t[0], t[1]["name"].lower()))
+    if not scored:
+        return None, []
+    top = scored[0][0]
+    return scored[0][1], [d for sc, d in scored[1:] if sc >= top - 1e-9]
+
+
+def parse_github_url(text):
+    """A dropped or pasted link -> 'https://github.com/owner/repo', else None. Accepts https and ssh forms, and
+    links that point deeper into the repo (issues, tree/main, ...)."""
+    t = (text or "").strip().splitlines()[0].strip() if (text or "").strip() else ""
+    m = re.match(r"(?:https?://(?:www\.)?github\.com/|git@github\.com:)([A-Za-z0-9][A-Za-z0-9-]{0,38})/"
+                 r"([A-Za-z0-9._-]+?)(?:\.git)?(?:[/?#].*)?$", t)
+    if not m or m.group(2) in (".", ".."):
+        return None
+    return f"https://github.com/{m.group(1)}/{m.group(2)}"
+
+
+def load_runs(path=None):
+    try:
+        with open(path or RUNS) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def record_run(pid, when=None, path=None):
+    """Remember that a project was just launched. A file of its own, so the command line can write it while the
+    window is open without the window's next save overwriting it."""
+    path = path or RUNS
+    runs = load_runs(path)
+    runs[pid] = when if when is not None else time.time()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(runs, f)
+    os.replace(tmp, path)
+
+
+def smart_groups(projects, now, runs, new_release_ids, installed, recent_days=30, stale_days=90):
+    """Groups that fill themselves: [(key, title, [projects])], empty ones left out. Tags make a group each."""
+    day = 86400
+
+    def age_days(d):
+        try:
+            return (now - time.mktime(time.strptime(d.get("updated", ""), "%Y-%m-%d"))) / day
+        except ValueError:
+            return None
+
+    out = [
+        ("recent", "Recently updated", [d for d in projects if (age_days(d) is not None and age_days(d) <= recent_days)]),
+        ("release", "Has a new release", [d for d in projects if d["id"] in new_release_ids]),
+        ("never", "Installed, never launched", [d for d in projects if installed(d) and d["id"] not in runs]),
+        ("stale", f"Unused for {stale_days} days",
+         [d for d in projects if installed(d) and d["id"] in runs and now - runs[d["id"]] > stale_days * day]),
+    ]
+    tags = sorted({t for d in projects for t in d.get("tags", [])})
+    out += [("tag:" + t, "#" + t, [d for d in projects if t in d.get("tags", [])]) for t in tags]
+    return [(k, title, ds) for k, title, ds in out if ds]
 
 
 def _detect_by_files(path):
@@ -885,7 +1010,7 @@ class Node(GObject.Object):
 
 def build_store(items, blurb=lambda d: ""):
     store = Gio.ListStore(item_type=Node)
-    for d in sorted(items, key=lambda d: (d["type"] != "group", not d.get("pinned"), d["name"].lower())):
+    for d in sorted(items, key=lambda d: (not d.get("smart"), d["type"] != "group", not d.get("pinned"), d["name"].lower())):
         if d["type"] == "group":
             store.append(Node(d, build_store(d["children"], blurb)))
         else:
@@ -955,6 +1080,7 @@ class Grove(Adw.ApplicationWindow):
         plus = Gio.Menu()
         plus.append("Sync from GitHub", "win.sync")
         plus.append("Add a project", "win.addproject")
+        plus.append("Import starred repos", "win.starred")
         plus.append("New group", "win.addgroup")
         header.pack_start(Gtk.MenuButton(icon_name="list-add-symbolic", menu_model=plus, tooltip_text="Add"))
         self.update_btn = Gtk.Button(icon_name="software-update-available-symbolic", visible=False,
@@ -963,6 +1089,7 @@ class Grove(Adw.ApplicationWindow):
         header.pack_end(self.update_btn)
         menu = Gio.Menu()
         top = Gio.Menu()
+        top.append("Quick launcher (Ctrl+K)", "win.launcher")
         top.append("Share a private repo…", "win.share")
         top.append("Welcome tour", "win.welcome")
         top.append("Update Grove", "win.update")
@@ -979,6 +1106,7 @@ class Grove(Adw.ApplicationWindow):
                          ("share", self.show_share_wizard), ("update", self.update_self),
                          ("restore", self.restore_removed), ("sync", self.sync),
                          ("addproject", self.add_project), ("addgroup", self.add_group),
+                         ("starred", self.sync_starred), ("launcher", self.show_launcher),
                          ("readmes", lambda: self.prefetch_readmes(force=True))):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", lambda _a, _p, fn=fn: fn())
@@ -1019,6 +1147,16 @@ class Grove(Adw.ApplicationWindow):
         content.add_top_bar(Adw.HeaderBar())
         self.content_page = Adw.NavigationPage(title="Details", child=content)
         split.set_content(self.content_page)
+
+        # Ctrl+K opens the quick launcher from anywhere (capture phase, so a focused search box can't swallow it)
+        hot = Gtk.ShortcutController(scope=Gtk.ShortcutScope.GLOBAL, propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        hot.add_shortcut(Gtk.Shortcut.new(Gtk.ShortcutTrigger.parse_string("<Control>k"),
+                                          Gtk.CallbackAction.new(lambda *_: self.show_launcher() or True)))
+        self.add_controller(hot)
+        # drop a GitHub link anywhere on the window to add (and maybe install) that repo
+        link_drop = Gtk.DropTarget.new(GObject.TYPE_STRING, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+        link_drop.connect("drop", lambda _t, value, _x, _y: self._drop_link(value))
+        self.add_controller(link_drop)
 
         self.connect("close-request", self._on_close)
         self.load_css()
@@ -1302,7 +1440,7 @@ class Grove(Adw.ApplicationWindow):
             self.expanded.add(parent["id"])
             _, _, parent = self.find(parent["id"])
 
-        root = self.search_store() if self.query else build_store(self.tree, self.blurb)
+        root = self.search_store() if self.query else build_store(self.smart_items() + self.tree, self.blurb)
         model = Gtk.TreeListModel.new(root, False, False, lambda n: n.kids)
         i = 0
         while i < model.get_n_items():
@@ -1344,6 +1482,15 @@ class Grove(Adw.ApplicationWindow):
         box.grad = ""
         for w in (box.pic, box.icon, text, box.lock, box.badge, box.chev, box.more):
             box.append(w)
+        # drag a repo onto a group (or beside another repo) to move it there
+        src = Gtk.DragSource(actions=Gdk.DragAction.MOVE)
+        src.connect("prepare", lambda _s, _x, _y: self._drag_prepare(box))
+        box.add_controller(src)
+        drop = Gtk.DropTarget.new(GObject.TYPE_STRING, Gdk.DragAction.MOVE)
+        drop.connect("enter", lambda *_: box.add_css_class("drop-hover") or Gdk.DragAction.MOVE)
+        drop.connect("leave", lambda *_: box.remove_css_class("drop-hover"))
+        drop.connect("drop", lambda _t, value, _x, _y: box.remove_css_class("drop-hover") or self._drop_on_row(box, value))
+        box.add_controller(drop)
         item.set_child(Gtk.TreeExpander(child=box))
 
     def _row_bind(self, _f, item):
@@ -1412,6 +1559,8 @@ class Grove(Adw.ApplicationWindow):
         self.content_page.set_title(node.data["name"] if node else ("PAYLOAD" if self.settings["hackers"] else "Details"))
         if node is None:
             page = self.empty_page()
+        elif node.data.get("smart"):
+            page = self.smart_page(node)
         elif node.is_group:
             page = self.group_page(node)
         else:
@@ -1512,7 +1661,7 @@ class Grove(Adw.ApplicationWindow):
         title = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, css_classes=["hero-title"], margin_top=6)
         node.bind_property("title", title, "label", GObject.BindingFlags.SYNC_CREATE)
         hero.append(title)
-        meta = " · ".join(m for m in [d.get("language"), "Private" if d.get("private") else "Public" if d["url"] else None,
+        meta = " · ".join(m for m in [" ".join("#" + t for t in d.get("tags", [])), d.get("language"), "Private" if d.get("private") else "Public" if d["url"] else None,
                                       f"Updated {d['updated']}" if d.get("updated") else None] if m)
         if meta:
             hero.append(Gtk.Label(label=meta, wrap=True, justify=Gtk.Justification.CENTER, css_classes=["dim-label", "caption"]))
@@ -1607,6 +1756,7 @@ class Grove(Adw.ApplicationWindow):
         exp.add_row(self.entry("Name", d, "name", node))
         exp.add_row(self.entry("Repository URL", d, "url"))
         exp.add_row(self.entry("Description", d, "description"))
+        exp.add_row(self.tags_row(d))
         exp.add_row(self.parent_combo(d))
         path_row = self.entry("Folder", d, "path")
         pick = Gtk.Button(icon_name="folder-open-symbolic", valign=Gtk.Align.CENTER,
@@ -1681,7 +1831,7 @@ class Grove(Adw.ApplicationWindow):
             if d["type"] != "project":
                 continue
             text = self.readme_text(d)
-            hay = " ".join([d["name"], d.get("description", ""), d.get("language", ""),
+            hay = " ".join([d["name"], d.get("description", ""), d.get("language", ""), " ".join(d.get("tags", [])),
                             summarize(text)[0] if text else ""]).lower()
             if self.query in hay:
                 store.append(Node(d, None, self.blurb(d)))
@@ -1836,6 +1986,239 @@ class Grove(Adw.ApplicationWindow):
                              if d.get("pinned") else "Deleting a group moves its contents up one level.")
         page.add(acts)
         return page
+
+    # ---- smart groups and tags ---------------------------------------
+    def tags_row(self, d):
+        row = Adw.EntryRow(title="Tags (comma separated)", text=", ".join(d.get("tags", [])), show_apply_button=True)
+
+        def apply(r):
+            d["tags"] = parse_tags(r.get_text())
+            if not d["tags"]:
+                d.pop("tags")
+            self.save()
+            self.rebuild(d["id"])
+        row.connect("apply", apply)
+        return row
+
+    def smart_items(self):
+        """Virtual groups that fill themselves (recently updated, has a new release, ...). They are rebuilt on
+        every rebuild(), never saved, and hold the same project dicts as the real tree."""
+        projects = [d for d, *_ in walk(self.tree) if d["type"] == "project"]
+        found = smart_groups(projects, time.time(), load_runs(), set(self.latest_tags), self.cloned)
+        if not found:
+            return []
+        kids = []
+        for key, title, members in found:
+            kid = new_group(title)
+            kid.update(id="smart:" + key, smart=True, children=members)
+            kids.append(kid)
+        root = new_group("Smart groups")
+        root.update(id=SMART_ROOT, smart=True, children=kids)
+        return [root]
+
+    def smart_page(self, node):
+        page = Adw.PreferencesPage()
+        g = Adw.PreferencesGroup(title=self.T(node.data["name"]))
+        g.set_description("Fills itself, so there is nothing to edit here. To tag a repo, open it and use "
+                          "Edit details and commands > Tags." if node.data["id"] == SMART_ROOT or
+                          node.data["id"].startswith("smart:tag:") else
+                          "Fills itself from what Grove knows about your repos, so there is nothing to edit here.")
+        page.add(g)
+        return page
+
+    # ---- starred repos -----------------------------------------------
+    def sync_starred(self):
+        """Your GitHub stars go into a Wishlist group, so Grove can try other people's tools too."""
+        if not gh_ready():
+            self.toast("Importing stars needs the GitHub CLI signed in: run `gh auth login` first")
+            return
+        self.toast("Fetching your starred repos…")
+        repos = []
+
+        def page(n):
+            self.run_async(["gh", "api", f"user/starred?per_page=100&page={n}"], lambda proc, out, err: got(n, proc, out, err))
+
+        def got(n, proc, out, err):
+            if proc.get_exit_status() != 0:
+                lines = (err or "").strip().splitlines()
+                self.toast(lines[-1] if lines else "Couldn't read your starred repos")
+                return
+            try:
+                batch = json.loads(out)
+            except ValueError:
+                self.toast("GitHub sent something Grove couldn't read")
+                return
+            repos.extend(rest_repo(r) for r in batch)
+            if len(batch) == 100 and n < 10:
+                page(n + 1)
+                return
+            added = self._import(repos, WISHLIST)
+            self.rebuild()
+            self.prefetch_readmes()
+            self.toast(f"Added {added} starred repo{'s' if added != 1 else ''} to Wishlist" if added
+                       else "No new starred repos")
+        page(1)
+
+    # ---- quick launcher ----------------------------------------------
+    def show_launcher(self):
+        """Ctrl+K: type part of a name, Enter runs it, Shift+Enter opens its page, Ctrl+Enter updates it."""
+        projects = [d for d, *_ in walk(self.tree) if d["type"] == "project"]
+        runs = load_runs()
+        dlg = Adw.Dialog(title="Quick launcher", content_width=460, content_height=460)
+        entry = Gtk.SearchEntry(placeholder_text="Type a project name…", margin_start=12, margin_end=12, margin_top=6)
+        lst = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE, css_classes=["boxed-list"],
+                          margin_start=12, margin_end=12, margin_top=8, margin_bottom=8)
+        hint = Gtk.Label(label="Enter: run   ·   Shift+Enter: open page   ·   Ctrl+Enter: update",
+                         css_classes=["dim-label", "caption"], margin_bottom=8)
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        body.append(entry)
+        body.append(Gtk.ScrolledWindow(child=lst, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER))
+        body.append(hint)
+        view = Adw.ToolbarView(content=body)
+        view.add_top_bar(Adw.HeaderBar())
+        dlg.set_child(view)
+
+        def fill(*_):
+            while (row := lst.get_row_at_index(0)) is not None:
+                lst.remove(row)
+            for d in launcher_matches(projects, entry.get_text(), runs, self.cloned):
+                here = self.cloned(d)
+                row = Adw.ActionRow(title=GLib.markup_escape_text(d["name"]), activatable=True,
+                                    subtitle=GLib.markup_escape_text(" ".join(
+                                        ["#" + t for t in d.get("tags", [])] + [d.get("description") or d.get("language") or ""]).strip()),
+                                    subtitle_lines=1)
+                row.add_suffix(Gtk.Label(label="Open" if here else "Get", css_classes=["dim-label", "caption"]))
+                row.project = d
+                lst.append(row)
+            first = lst.get_row_at_index(0)
+            if first:
+                lst.select_row(first)
+
+        def act(how):
+            row = lst.get_selected_row()
+            if row is None:
+                return
+            d = row.project
+            dlg.close()
+            if how == "run":
+                self.run_project(d)
+            elif how == "page":
+                if self.query:
+                    self.search.set_text("")
+                    self.query = ""
+                self.rebuild(d["id"])
+            else:
+                self.launcher_update(d)
+
+        def move(step):
+            row = lst.get_selected_row()
+            i = (row.get_index() if row else -1) + step
+            target = lst.get_row_at_index(max(i, 0))
+            if target:
+                lst.select_row(target)
+
+        def key(_c, keyval, _code, state):
+            if keyval == Gdk.KEY_Down:
+                move(1)
+            elif keyval == Gdk.KEY_Up:
+                move(-1)
+            elif keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+                act("update" if state & Gdk.ModifierType.CONTROL_MASK else
+                    "page" if state & Gdk.ModifierType.SHIFT_MASK else "run")
+            else:
+                return False
+            return True
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", key)
+        entry.add_controller(keys)
+        entry.connect("search-changed", fill)
+        lst.connect("row-activated", lambda _l, row: (lst.select_row(row), act("run")))
+        fill()
+        dlg.present(self)
+        entry.grab_focus()
+
+    def launcher_update(self, d):
+        if d["id"] in self.latest_tags and d.get("release"):
+            self.update_release(d)
+        elif self.git_behind.get(d["id"]):
+            self.update_git(d)
+        elif self.cloned(d):
+            self.toast(f"No update known for {d['name']} yet: open its page and Grove will check")
+        else:
+            self.toast(f"{d['name']} isn't installed yet")
+
+    # ---- drag and drop -----------------------------------------------
+    def _drag_prepare(self, box):
+        node = getattr(box, "node", None)
+        if node is None or node.is_group:   # only repos are dragged
+            return None
+        return Gdk.ContentProvider.new_for_value(node.data["id"])
+
+    def _drop_on_row(self, box, value):
+        """A repo dropped on a group goes into it; dropped on another repo it joins that repo's group."""
+        node = getattr(box, "node", None)
+        d, sibs, _ = self.find(value) if isinstance(value, str) else (None, None, None)
+        if node is None or d is None or d["type"] != "project":
+            return False
+        if node.data.get("smart"):
+            self.toast("Smart groups fill themselves: drop it on one of your own groups")
+            return False
+        if node.is_group:
+            target_group = node.data
+        else:
+            target_group = self.find(node.data["id"])[2]
+        target = target_group["children"] if target_group else self.tree
+        if target is sibs:
+            return False
+        sibs.remove(d)
+        target.append(d)
+        if target_group:
+            self.expanded.add(target_group["id"])
+        self.rebuild()
+        self.toast(f"Moved {d['name']} to {target_group['name'] if target_group else 'the top level'}")
+        return True
+
+    def _drop_link(self, value):
+        """A link dropped on the window: ask whether to add it, or add and install it."""
+        if not isinstance(value, str) or self.find(value)[0] is not None:   # not text, or a repo dragged off the list
+            return False
+        url = parse_github_url(value)
+        if not url:
+            self.toast("That doesn't look like a GitHub repository link")
+            return False
+        known = next((d for d, *_ in walk(self.tree) if d["type"] == "project" and d["url"].lower() == url.lower()), None)
+        if known:
+            self.toast(f"{known['name']} is already in your list")
+            self.rebuild(known["id"])
+            return True
+        slug = repo_slug(url)
+        dlg = Adw.AlertDialog(heading=f"Add {slug}?",
+                              body="Grove adds it to your list. You can also download and set it up right away.")
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("add", "Add")
+        dlg.add_response("install", "Add and install")
+        dlg.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
+        dlg.set_default_response("install")
+        dlg.set_close_response("cancel")
+        dlg.connect("response", lambda _d, r: r != "cancel" and self.add_repo(url, install=(r == "install")))
+        dlg.present(self)
+        return True
+
+    def add_repo(self, url, install=False):
+        name = repo_slug(url).split("/")[1]
+        grp = next((d for d in self.tree if d["type"] == "group" and d["name"].lower() == INBOX.lower()), None)
+        if grp is None:
+            grp = new_group(INBOX)
+            self.tree.append(grp)
+        guess = os.path.join(self.settings["projects_dir"], name)
+        p = new_project(name, url=url, path=guess if os.path.isdir(guess) else "")
+        grp["children"].append(p)
+        self.expanded.add(grp["id"])
+        self.rebuild(p["id"])
+        self.prefetch_readmes()
+        self.toast(f"Added {name}")
+        if install:
+            self.install(p)
 
     # ---- tree edits --------------------------------------------------
     def selected_group(self):
@@ -2134,6 +2517,7 @@ class Grove(Adw.ApplicationWindow):
 
     def _launch(self, d, with_install):
         self.fill_missing(d)
+        record_run(d["id"])
         steps = [c for c in ((d.get("install") if with_install else ""), d.get("run")) if c]
         if not d.get("run"):
             index = os.path.join(os.path.expanduser(d["path"]), "index.html")
@@ -3177,9 +3561,76 @@ class BuddyBar(Gtk.Box):
         return False
 
 
+def _exec_in(path, cmd):
+    """Replace this process with `cmd` run from `path` (the command line's `grove run`)."""
+    os.chdir(path)
+    os.execvp("sh", ["sh", "-c", cmd])
+
+
+CLI_HELP = """Grove: GitHub project launcher
+
+  grove                 open the window
+  grove --quick         open the window with the quick launcher (Ctrl+K)
+  grove list [word]     list your projects ([installed] marks the ones on this computer)
+  grove run <name>      run an installed project here in this terminal (a close match is enough)
+"""
+
+
+def cli_main(argv, config=None, runs_path=None, runner=_exec_in, out=print, err=lambda m: print(m, file=sys.stderr)):
+    """`grove list` and `grove run <name>`, with no window. Returns the exit code (runner replaces the process)."""
+    try:
+        with open(config or CONFIG) as f:
+            tree = json.load(f).get("tree", [])
+    except (OSError, ValueError):
+        tree = []
+    projects = [d for d, *_ in walk(tree) if d["type"] == "project"]
+
+    def here(d):
+        path = os.path.expanduser(d.get("path") or "")
+        return os.path.isdir(path) and any(e != ".git" for e in os.listdir(path))
+    cmd = argv[0] if argv else ""
+    if cmd == "list":
+        word = " ".join(argv[1:]).strip().lower()
+        for d in sorted(projects, key=lambda d: d["name"].lower()):
+            if word in d["name"].lower() or word in " ".join(d.get("tags", [])):
+                out(f"{d['name']}{'  [installed]' if here(d) else ''}")
+        return 0
+    if cmd == "run" and len(argv) > 1:
+        d, rivals = resolve_project(projects, " ".join(argv[1:]))
+        if d is None:
+            err(f"grove: no project matches '{' '.join(argv[1:])}' (try: grove list)")
+            return 1
+        if rivals:
+            err(f"grove: '{' '.join(argv[1:])}' also matches {', '.join(r['name'] for r in rivals)}; running {d['name']}")
+        if not here(d):
+            err(f"grove: {d['name']} isn't installed yet: open Grove (or press Ctrl+K there) and press Get")
+            return 1
+        path = os.path.expanduser(d["path"])
+        run = d.get("run")
+        if not run and os.path.exists(os.path.join(path, "index.html")):
+            run = "xdg-open index.html"
+        if not run:
+            err(f"grove: Grove doesn't know how to start {d['name']} yet: open it in Grove to detect the command")
+            return 1
+        record_run(d["id"], path=runs_path)
+        runner(path, run)
+        return 0
+    out(CLI_HELP)
+    return 0 if cmd in ("-h", "--help", "help") else 2
+
+
 class App(Adw.Application):
     def __init__(self):
-        super().__init__(application_id=APP_ID)
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+
+    def do_command_line(self, cl):
+        """`grove --quick` (also the start menu's Quick launcher action) reaches an already-open window too."""
+        args = cl.get_arguments()[1:]
+        self.activate()
+        if "--quick" in args:
+            win = self.props.active_window
+            GLib.idle_add(lambda: win.show_launcher() and False)
+        return 0
 
     def do_activate(self):
         Gtk.Window.set_default_icon_name(ICON_NAME)
@@ -3193,4 +3644,6 @@ class App(Adw.Application):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] in ("run", "list", "help", "-h", "--help"):
+        sys.exit(cli_main(sys.argv[1:]))
     sys.exit(App().run(sys.argv))

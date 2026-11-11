@@ -40,6 +40,10 @@ It holds `{tree, settings, hidden, welcomed, ...}`. Field-level detail is in
 `TreeListModel`, rebuilt by `rebuild()`. Selecting a project sets `show-content`; going back clears the
 selection. Groups are section headings that fold on tap, and their ⋯ button opens a group page via `open_group()`.
 
+**Smart groups** are virtual: `smart_items()` builds them from the real tree on every `rebuild()` and prepends them to the store. They hold the same project dicts as the real groups, are flagged `smart`, and are never saved or valid drop targets.
+
+**Command line.** `grove list` and `grove run <name>` are handled by `cli_main()` before GTK starts a window. `grove --quick` goes through `Gio.Application`'s command-line handling so it also reaches an already-open window.
+
 **The look** is three CSS layers loaded in order, later winning: `APP_CSS`, then the warm palette
 (`WARM_LIGHT` / `WARM_DARK` / `WARM_CSS`, which override libadwaita's named colours), then `HACKERS_CSS`.
 

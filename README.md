@@ -58,6 +58,13 @@ First launch shows a short welcome tour (reopen it from the menu). Tap a project
   A plain git clone (a repo with no releases) checks GitHub when you open it, and again a minute after the
   last check, and shows **Update (N new commits)**. It only fast-forwards a clean copy on the main branch (or one left
   on a detached commit that is already on GitHub). Uncommitted changes, other branches and local commits are never touched.
+- **Tags and smart groups.** Give a repo tags (Edit details and commands > Tags). A "Smart groups" section at the top fills
+  itself: recently updated, has a new release, installed but never launched, unused for 90 days, and one group per tag.
+- **Wishlist.** ☰/+ menu > *Import starred repos* puts your GitHub stars in a "Wishlist" group (needs `gh` signed in).
+- **Quick launcher.** Ctrl+K: type part of a name, Enter runs it, Shift+Enter opens its page, Ctrl+Enter updates it.
+  From a terminal: `grove run <name>`, `grove list`, `grove --quick` (the installer adds a `grove` command in `~/.local/bin`
+  and a "Quick launcher" action on the start-menu entry).
+- **Drag and drop.** Drag a repo onto a group to move it. Drop a GitHub link on the window to add it, or add and install it.
 - **Remove** a repo with the trash button under the tree, the Delete key, or the button on its page. Grove asks first,
   and for a clone it can also delete the local copy (only a git checkout of that exact repo, with a warning if it
   has uncommitted changes). Removed repos stay gone after a sync; ☰ → *Bring back removed repos* undoes it.

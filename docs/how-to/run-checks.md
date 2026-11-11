@@ -11,6 +11,8 @@ python3 tests/test_icons.py
 python3 tests/test_gh.py
 python3 tests/test_buddy.py
 python3 tests/test_git_update.py
+python3 tests/test_smart.py
+python3 tests/test_ui_smart.py   # needs a display
 ```
 
 Add a `check(...)` case for any new pure helper you write.

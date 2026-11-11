@@ -10,7 +10,17 @@ Top-level keys: `tree`, `settings`, `hidden`, `welcomed`, and others added as fe
 
 A project in `tree` has:
 
-`id`, `name`, `url`, `description`, `path`, `install`, `run`, `private`, `language`, `updated`, `site`, `release`
+`id`, `name`, `url`, `description`, `path`, `install`, `run`, `private`, `language`, `updated`, `site`, `release`, `tags`
+
+`tags` is a list of lower-case words. Smart groups ("Recently updated", "Has a new release", "Installed, never launched", "Unused for 90 days", one per tag) are built on every `rebuild()` and **never saved**; their ids start with `smart:`.
+
+## Launch history
+
+`~/.config/grove/runs.json` maps project id to the time Grove last launched it. It is its own file so `grove run` can write it while the window is open without the window's next `save()` overwriting it.
+
+## Wishlist
+
+Menu > Import starred repos puts your GitHub stars in a top-level group named `Wishlist` (needs `gh` signed in; uses `gh_ready()`).
 
 ## Icon lookup order
 

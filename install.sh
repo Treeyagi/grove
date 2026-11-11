@@ -9,9 +9,10 @@ DEST="$HOME/.local/share/grove"
 APPS="$HOME/.local/share/applications"
 ICONS="$HOME/.local/share/icons/hicolor/scalable/apps"
 ICON_NAME="io.github.grove.Launcher"
+BIN="$HOME/.local/bin"
 
 if [ "$1" = "--uninstall" ]; then
-  rm -rf "$DEST" "$APPS/grove.desktop" "$ICONS/$ICON_NAME.svg"
+  rm -rf "$DEST" "$APPS/grove.desktop" "$ICONS/$ICON_NAME.svg" "$BIN/grove"
   echo "Grove removed. Your projects list (~/.config/grove) was left alone."
   exit 0
 fi
@@ -25,7 +26,7 @@ if ! python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version(
   exit 1
 fi
 
-mkdir -p "$DEST" "$APPS" "$ICONS"
+mkdir -p "$DEST" "$APPS" "$ICONS" "$BIN"
 here=$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)
 if [ -n "$here" ] && [ -f "$here/grove.py" ]; then
   cp "$here/grove.py" "$DEST/grove.py"
@@ -47,9 +48,18 @@ Exec=python3 $DEST/grove.py
 Icon=$ICON_NAME
 Categories=Development;
 Terminal=false
+Actions=quick;
+
+[Desktop Action quick]
+Name=Quick launcher
+Exec=python3 $DEST/grove.py --quick
 DESK
 
-echo "Grove installed to $DEST (also in your app menu)."
+# the `grove` command: `grove run <name>`, `grove list`, `grove --quick`
+printf '#!/bin/sh\nexec python3 "%s/grove.py" "$@"\n' "$DEST" > "$BIN/grove"
+chmod +x "$BIN/grove"
+
+echo "Grove installed to $DEST (also in your app menu, and as the 'grove' command if $BIN is on your PATH)."
 case " $* " in
   *" --no-launch "*) ;;
   *) nohup python3 "$DEST/grove.py" >/dev/null 2>&1 & ;;
