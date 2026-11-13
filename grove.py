@@ -1055,6 +1055,8 @@ class Grove(Adw.ApplicationWindow):
         self.latest_tags = {}         # project id -> the newer release found
         self.git_behind = {}          # project id -> commits a plain git clone is behind GitHub
         self.git_checked = {}         # project id -> when it was last asked (checked again after a minute)
+        self.update_ok = {}           # project id -> release tag a manual check found to be the latest
+        self.untracked_latest = {}    # project id -> latest release of an install that never recorded its release
         self.sel = None
         self.expanded = set(self.data.get("expanded", []))
         self.query = ""
@@ -1093,6 +1095,7 @@ class Grove(Adw.ApplicationWindow):
         top.append("Share a private repo…", "win.share")
         top.append("Welcome tour", "win.welcome")
         top.append("Update Grove", "win.update")
+        top.append("Check my projects for updates", "win.checkall")
         menu.append_section(None, top)
         more = Gio.Menu()
         more.append("Hacker-movie theme", "win.hackers")
@@ -1104,7 +1107,7 @@ class Grove(Adw.ApplicationWindow):
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, tooltip_text="More"))
         for name, fn in (("settings", self.show_settings), ("welcome", self.show_welcome),
                          ("share", self.show_share_wizard), ("update", self.update_self),
-                         ("restore", self.restore_removed), ("sync", self.sync),
+                         ("restore", self.restore_removed), ("sync", self.sync), ("checkall", self.check_all_updates),
                          ("addproject", self.add_project), ("addgroup", self.add_group),
                          ("starred", self.sync_starred), ("launcher", self.show_launcher),
                          ("readmes", lambda: self.prefetch_readmes(force=True))):
@@ -1681,6 +1684,8 @@ class Grove(Adw.ApplicationWindow):
         hero.append(main)
         status = ("Installed" + (f" · {rel['tag']}" if rel.get("tag") else "")) if here else \
             "Not installed yet" if d["url"] else "Choose a repository or folder under Advanced"
+        if here and rel.get("tag") and self.update_ok.get(d["id"]) == rel["tag"]:
+            status += " · up to date"
         hero.append(Gtk.Label(label=status, wrap=True, justify=Gtk.Justification.CENTER, css_classes=["dim-label", "caption"]))
         newer = self.latest_tags.get(d["id"])
         if newer and rel and newer["tag"] != rel["tag"]:
@@ -1700,6 +1705,20 @@ class Grove(Adw.ApplicationWindow):
             GLib.idle_add(self.check_update, d)
         elif here and d["url"]:
             GLib.idle_add(self.check_git_update, d)
+        latest = self.untracked_latest.get(d["id"])
+        if here and not rel and latest:   # installed, but never recorded which release it came from
+            sw = Gtk.Button(child=Adw.ButtonContent(icon_name="software-update-available-symbolic",
+                                                    label=f"Switch to release {latest['tag']}"),
+                            css_classes=["pill"], halign=Gtk.Align.CENTER, margin_top=4,
+                            tooltip_text="Downloads the latest release; the current folder is kept as .old-…")
+            sw.connect("clicked", lambda b: self._install_from_release(d, b))
+            hero.append(sw)
+        if here and repo_slug(d["url"]) and not (newer and rel and newer["tag"] != rel["tag"]):
+            chk = Gtk.Button(child=Adw.ButtonContent(icon_name="view-refresh-symbolic", label="Check for updates"),
+                             css_classes=["flat"], halign=Gtk.Align.CENTER, margin_top=2,
+                             tooltip_text="Ask GitHub right now whether there is a newer release")
+            chk.connect("clicked", lambda b: self.check_now_button(d, b))
+            hero.append(chk)
         page.add(hero)
 
         # what is it?
@@ -2925,6 +2944,91 @@ class Grove(Adw.ApplicationWindow):
             self.save()
             self.rebuild(d["id"])
         self.run_async(["git", "-C", path, "fetch", "--quiet", "origin"], fetched, slug=repo_slug(d["url"]))
+
+    def check_now(self, d, done):
+        """Ask GitHub right now (ignoring the once-per-session rule) about one project's latest release.
+        done(status, rel): status is "newer", "uptodate", "untracked" (installed without a recorded release),
+        "notinstalled", "norepo" or "error"."""
+        slug = repo_slug(d.get("url") or "")
+        if not slug:
+            done("norepo", None)
+            return
+        if not self.cloned(d):
+            done("notinstalled", None)
+            return
+
+        def got(rel):
+            if not rel:
+                done("error", None)
+                return
+            have = d.get("release")
+            if not have:
+                self.untracked_latest[d["id"]] = rel
+                done("untracked", rel)
+            elif rel["tag"] != have["tag"]:
+                self.latest_tags[d["id"]] = rel
+                self.update_ok.pop(d["id"], None)
+                done("newer", rel)
+            else:
+                self.latest_tags.pop(d["id"], None)
+                self.update_ok[d["id"]] = rel["tag"]
+                done("uptodate", rel)
+        self.latest_release(slug, got)
+
+    def check_now_button(self, d, button):
+        """The 'Check for updates' button on a project's page."""
+        self._busy(button, "Checking…", f"Checking {d['name']} for updates…")
+
+        def done(status, rel):
+            have = (d.get("release") or {}).get("tag")
+            self.toast({
+                "newer": f"{d['name']}: {rel['tag']} is out (you have {have}). Press Update." if rel else "",
+                "uptodate": f"{d['name']} is up to date ({have}).",
+                "untracked": f"{d['name']}: the latest release is {rel['tag']} (your copy didn't record its release)." if rel else "",
+                "error": f"Couldn't reach GitHub to check {d['name']}. Try again in a moment.",
+                "norepo": f"{d['name']} has no GitHub repository set.",
+                "notinstalled": f"{d['name']} isn't installed yet.",
+            }[status])
+            self.rebuild(d["id"])
+        self.check_now(d, done)
+
+    def check_all_updates(self):
+        """Menu > Check my projects for updates: every installed project, then one summary."""
+        todo = [d for d, *_ in walk(self.tree) if d["type"] == "project" and self.cloned(d)
+                and repo_slug(d.get("url") or "")]
+        if not todo:
+            self.toast("No installed projects to check yet")
+            return
+        self.toast(f"Checking {len(todo)} projects for updates…")
+        results, left = {}, [len(todo)]
+
+        def one(d):
+            def done(status, rel):
+                results[d["id"]] = (d, status, rel)
+                left[0] -= 1
+                if left[0] == 0:
+                    self._check_all_done(results)
+            self.check_now(d, done)
+        for d in todo:
+            one(d)
+
+    def _check_all_done(self, results):
+        rows = list(results.values())
+        newer = [f"{d['name']} {rel['tag']}" for d, st, rel in rows if st == "newer"]
+        untracked = [d["name"] for d, st, _ in rows if st == "untracked"]
+        failed = [d["name"] for d, st, _ in rows if st == "error"]
+        parts = []
+        if newer:
+            parts.append(f"{len(newer)} update{'s' if len(newer) != 1 else ''}: " + ", ".join(newer))
+        if untracked:
+            parts.append("no release recorded for " + ", ".join(untracked) + " (open it to switch)")
+        if failed:
+            parts.append("couldn't check " + ", ".join(failed))
+        self.toast(("; ".join(parts) + ".") if parts else f"All {len(rows)} projects are up to date.")
+        cur = self.current()
+        if cur:
+            self.show_detail()
+        self.refresh_subtitles()
 
     def update_release(self, d, button=None):
         rel = self.latest_tags.get(d["id"])
