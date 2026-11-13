@@ -12,7 +12,13 @@ A project in `tree` has:
 
 `id`, `name`, `url`, `description`, `path`, `install`, `run`, `private`, `language`, `updated`, `site`, `release`, `tags`
 
-`tags` is a list of lower-case words. Smart groups ("Recently updated", "Has a new release", "Installed, never launched", "Unused for 90 days", one per tag) are built on every `rebuild()` and **never saved**; their ids start with `smart:`.
+`tags` is a list of lower-case words. Smart groups ("Recently updated", "Has a new release", "Installed, never launched", "Unused for 90 days", one per tag) are built on every `rebuild()` and **never saved**; their ids start with `smart:`. They are **off unless `settings.smart_lists` is true** (Settings > Smart lists), because they repeat repos that are already in real lists.
+
+## Where synced repos go
+
+- `Treeyagi` (`FEATURED`): Treeyagi's public repos, for everyone, pinned first.
+- Your own sync (signed-in `gh`): a list named after your GitHub login. When that login is Treeyagi, it is the same `Treeyagi` list, not a second one.
+- `Unsorted` (`INBOX`): repos added by URL. On start, and after your own sync, `merge_inbox()` folds it into its owner's list when every repo in it has the same owner (folders inside move unchanged).
 
 ## Launch history
 

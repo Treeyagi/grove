@@ -208,6 +208,7 @@ def default_settings():
         "public_only": False,  # never import private repos
         "prefer_releases": True,  # Install and Run download a repo's latest release when it has one
         "buddy": True,         # Treeyagi, the animated buddy along the bottom of the window
+        "smart_lists": False,  # automatic lists (recently updated, ...) on top; off so each repo shows once
     }
 
 
@@ -222,6 +223,31 @@ def new_group(name):
 def new_project(name, **kw):
     return {"type": "project", "id": new_id(), "name": name, "url": "",
             "description": "", "path": "", "install": "", "run": "", "site": "", "private": False, **kw}
+
+
+def merge_inbox(tree, login=None):
+    """Move the Unsorted list into its owner's own list when every repo in it belongs to one GitHub account, so
+    your own repos sit in one place (yours are Treeyagi's for Treeyagi). login: the account you just synced as;
+    without it, only an owner list that already exists is used. Folders inside move unchanged. True if moved."""
+    inbox = next((d for d in tree if d["type"] == "group" and d["name"].lower() == INBOX.lower()), None)
+    if not inbox:
+        return False
+    owners = {(repo_slug(d.get("url")) or "").split("/")[0].lower()
+              for d, *_ in walk(inbox["children"]) if d["type"] == "project"}
+    if len(owners) != 1 or "" in owners:   # empty, mixed owners, or a local folder: leave it to you
+        return False
+    owner = owners.pop()
+    if login and login.lower() != owner:
+        return False
+    target = next((d for d in tree if d is not inbox and d["type"] == "group" and d["name"].lower() == owner), None)
+    if target:
+        target["children"].extend(inbox["children"])
+        tree.remove(inbox)
+    elif login:
+        inbox["name"] = FEATURED if login.lower() == FEATURED.lower() else login
+    else:
+        return False
+    return True
 
 
 def walk(items, parent=None):
@@ -1255,6 +1281,7 @@ class Grove(Adw.ApplicationWindow):
         except (OSError, ValueError):
             self.data = {}
         self.data.setdefault("tree", [])
+        merge_inbox(self.data["tree"])
         self.data["settings"] = {**default_settings(), **self.data.get("settings", {})}
         for gone in ("background", "background_fmt"):   # the old cow-farm video option
             self.data["settings"].pop(gone, None)
@@ -2034,7 +2061,10 @@ class Grove(Adw.ApplicationWindow):
 
     def smart_items(self):
         """Virtual groups that fill themselves (recently updated, has a new release, ...). They are rebuilt on
-        every rebuild(), never saved, and hold the same project dicts as the real tree."""
+        every rebuild(), never saved, and hold the same project dicts as the real tree. Off unless turned on in
+        Settings, because they repeat repos that are already in your lists."""
+        if not self.settings.get("smart_lists"):
+            return []
         projects = [d for d, *_ in walk(self.tree) if d["type"] == "project"]
         found = smart_groups(projects, time.time(), load_runs(), set(self.latest_tags), self.cloned)
         if not found:
@@ -2668,17 +2698,23 @@ class Grove(Adw.ApplicationWindow):
         nxt()
 
     def sync_mine(self):
-        """The signed-in gh account's own repos (private ones too, unless public-only)."""
+        """The signed-in gh account's own repos (private ones too, unless public-only), in a list named after that
+        account; Treeyagi's own sync goes into the Treeyagi list everybody has, not a second one."""
         if not gh_ready():
             self.finish_sync()
             return
-        argv = ["gh", "repo", "list", "--limit", "500", "--json", self.REPO_FIELDS]   # always your own login, never the shared token
+        argv = ["gh", "repo", "list", "--limit", "500", "--json", self.REPO_FIELDS + ",owner"]   # always your own login, never the shared token
         if self.settings.get("public_only"):
             argv += ["--visibility", "public"]
 
         def done(proc, out, err):
             if proc.get_exit_status() == 0:
-                self._added += self._import(json.loads(out), INBOX)
+                repos = json.loads(out)
+                login = repos[0]["owner"]["login"] if repos else ""
+                if login:
+                    me = login.lower() == FEATURED.lower()
+                    self._added += self._import(repos, FEATURED if me else login, pinned=me)
+                    merge_inbox(self.tree, login)
             self.finish_sync()
         self.run_async(argv, done)
 
@@ -3362,6 +3398,9 @@ class Grove(Adw.ApplicationWindow):
         lst.append(pub_row)
         lst.append(rel_row)
         lst.append(buddy_row)
+        smart_row = Adw.SwitchRow(title="Smart lists", active=s.get("smart_lists", False),
+                                  subtitle="Extra lists on top (recently updated, never launched, by tag): they repeat repos from your lists")
+        lst.append(smart_row)
         dlg = Adw.AlertDialog(heading="Settings", extra_child=lst,
                               body=f"{FEATURED}'s public repos are always shown first. "
                                    "Add other GitHub users to follow their public repos too.")
@@ -3379,6 +3418,7 @@ class Grove(Adw.ApplicationWindow):
                 s["public_only"] = pub_row.get_active()
                 s["prefer_releases"] = rel_row.get_active()
                 s["buddy"] = buddy_row.get_active()
+                s["smart_lists"] = smart_row.get_active()
                 self.save()
                 self.lookup_action("buddy").set_state(GLib.Variant.new_boolean(s["buddy"]))
                 self.update_buddy()

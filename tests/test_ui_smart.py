@@ -26,6 +26,8 @@ def check(name, got, want):
 
 def run(win):
     win.settings["buddy"] = False
+    check("smart lists are off by default", win.smart_items(), [])
+    win.settings["smart_lists"] = True
     # no network: keep the window's own background jobs quiet
     win.prefetch_readmes = lambda force=False: None
     win.check_all_sites = lambda: None

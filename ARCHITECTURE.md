@@ -41,6 +41,10 @@ It holds `{tree, settings, hidden, welcomed, ...}`. Field-level detail is in
   to `~/.local/share/…`, so without this the menu entry kept starting the old version. install.sh must never start
   the app; Grove does that.
 
+**Each repo shows once.** *(2026-11-13)* Smart lists are off by default (a Settings switch), and your own sync
+lands in a list named after your GitHub login, which for Treeyagi is the shared Treeyagi list, so Treeyagi doesn't
+see their repos split between `Treeyagi` and `Unsorted`.
+
 **Navigation** is an `Adw.NavigationSplitView(collapsed=True)`. The sidebar is the home `ListView` over a
 `TreeListModel`, rebuilt by `rebuild()`. Selecting a project sets `show-content`; going back clears the
 selection. Groups are section headings that fold on tap, and their ⋯ button opens a group page via `open_group()`.

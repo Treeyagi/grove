@@ -90,5 +90,44 @@ with tempfile.TemporaryDirectory() as tmp:
         f.write("not json")
     check("corrupt file ignored", g.load_runs(path), {})
 
+# ---- your own repos end up in one list (Unsorted folds into its owner's list) ----
+def repo(name, owner="Treeyagi"):
+    return g.new_project(name, url=f"https://github.com/{owner}/{name}")
+
+
+def tree_with_inbox(*inbox_kids, featured=True):
+    feat = g.new_group("Treeyagi")
+    feat["children"] = [repo("grove")]
+    inbox = g.new_group("Unsorted")
+    inbox["children"] = list(inbox_kids)
+    return ([feat] if featured else []) + [inbox]
+
+
+apps = g.new_group("Apps")
+apps["children"] = [repo("Medllm")]
+t = tree_with_inbox(repo("spare"), apps)
+check("Unsorted of Treeyagi's repos merges on start", g.merge_inbox(t), True)
+check("one list left, folders kept", [(d["name"], [c["name"] for c in d["children"]]) for d in t],
+      [("Treeyagi", ["grove", "spare", "Apps"])])
+
+t = tree_with_inbox(repo("spare"), repo("theirs", owner="someone"))
+check("mixed owners stay put", (g.merge_inbox(t), [d["name"] for d in t]), (False, ["Treeyagi", "Unsorted"]))
+
+t = tree_with_inbox(repo("spare"), g.new_project("local", path="/tmp/x"))
+check("a local folder keeps Unsorted", g.merge_inbox(t), False)
+
+t = tree_with_inbox(repo("mine", owner="bob"))
+check("no list for that owner yet: wait for a sync", g.merge_inbox(t), False)
+check("someone else's sync names the list after them", (g.merge_inbox(t, "bob"), [d["name"] for d in t]),
+      (True, ["Treeyagi", "bob"]))
+
+t = tree_with_inbox(repo("spare"), featured=False)
+check("Treeyagi syncing with no Treeyagi list yet", (g.merge_inbox(t, "treeyagi"), [d["name"] for d in t]),
+      (True, ["Treeyagi"]))
+
+t = tree_with_inbox(repo("spare"))
+check("another login never takes Treeyagi's repos", g.merge_inbox(t, "bob"), False)
+check("smart lists off by default", g.default_settings()["smart_lists"], False)
+
 print("\nALL OK" if not failed else f"\n{len(failed)} FAILED")
 sys.exit(1 if failed else 0)
