@@ -35,6 +35,11 @@ It holds `{tree, settings, hidden, welcomed, ...}`. Field-level detail is in
   `fill_missing()` → `detect_commands()` → run the install step in a terminal.
 - **Open** — `run_project()`. The project is installed, so just launch it.
 - A project that has an install step but nothing runnable shows **Install** instead of Open.
+- **Update** (a newer release) — `update_release()`. A downloaded release is unpacked over a fresh folder (the old one is
+  kept as `.old-…`); if the project's install step is `./install.sh`, `_updated()` runs it again in the background,
+  without a token or keyboard, and toasts the result. *(2026-11-13)* Installers like MedLLM Lab's copy the program
+  to `~/.local/share/…`, so without this the menu entry kept starting the old version. install.sh must never start
+  the app; Grove does that.
 
 **Navigation** is an `Adw.NavigationSplitView(collapsed=True)`. The sidebar is the home `ListView` over a
 `TreeListModel`, rebuilt by `rebuild()`. Selecting a project sets `show-content`; going back clears the

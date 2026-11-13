@@ -393,6 +393,19 @@ def _detect_by_files(path):
 
 
 
+def reinstall_needed(install):
+    """After a downloaded release replaces a project's folder: does its install step (install.sh) have to run again?
+    Such installers copy the program elsewhere, which keeps running the old version otherwise. A software step
+    in front of it (`deps && ./install.sh`) was done on the first install and is skipped."""
+    install = (install or "").strip()
+    return install == "./install.sh" or install.endswith("&& ./install.sh")
+
+
+def reinstall_argv(path):
+    """The command that runs a project's install.sh again in its folder, with no keyboard to wait on."""
+    return ["sh", "-c", 'cd "$1" && exec ./install.sh </dev/null', "grove-reinstall", path]
+
+
 # ---- releases -------------------------------------------------------------------------------
 # Worst first: things that are not for a Linux PC, and files that are not the program.
 NOT_FOR_US = re.compile(r"(?i)(mac|darwin|osx|\.exe|\.msi|\.dmg|\.deb|\.rpm|\.apk|\.sig|\.asc|\.sha|\.md5|\.txt|\.json"
@@ -3059,11 +3072,29 @@ class Grove(Adw.ApplicationWindow):
                        lambda p, _o, _e: self.run_async(["git", "-C", path, "checkout", "-q", rel["tag"]], checked_out), slug=slug)
 
     def _updated(self, d, rel, ok):
-        if ok:
-            self.latest_tags.pop(d["id"], None)
-            self.toast(f"Updated {d['name']} to {rel['tag']} (the old copy is kept beside it)")
-            self.fill_missing(d)
-        self.rebuild(d["id"])
+        if not ok:
+            self.rebuild(d["id"])
+            return
+        self.latest_tags.pop(d["id"], None)
+        self.fill_missing(d)
+        msg = f"Updated {d['name']} to {rel['tag']} (the old copy is kept beside it)"
+        if not reinstall_needed(d.get("install")):
+            self.toast(msg)
+            self.rebuild(d["id"])
+            return
+
+        # Its installer copies the program somewhere else (its own folder, the app menu), so that copy is still the old
+        # version until install.sh runs again, as it did on the first Get. Out of sight, with no input and no token
+        # (install.sh must never start the app; Grove runs it).
+        def reinstalled(proc, _o, err):
+            if proc.get_exit_status() == 0:
+                self.toast(f"{msg} and ran its installer again")
+            else:
+                lines = (err or "").strip().splitlines()
+                self.toast(f"Updated {d['name']} to {rel['tag']}, but its install.sh failed"
+                           + (f": {lines[-1]}" if lines else "") + ". Use \"Install again\" on its page to see why.")
+            self.rebuild(d["id"])
+        self.run_async(reinstall_argv(os.path.expanduser(d["path"])), reinstalled)
 
     # ---- settings ----------------------------------------------------
     # ---- first-run welcome ---------------------------------------------------

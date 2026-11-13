@@ -101,5 +101,83 @@ s = Stub([], {})
 s.check_all_updates()
 check("check all with nothing installed", s.toasts[-1], "No installed projects to check yet")
 
+# ---- after a downloaded update, install.sh runs again (it copies the program elsewhere, e.g. ~/.local/share) ----
+import subprocess  # noqa: E402
+
+
+class Proc:
+    def __init__(self, rc):
+        self.rc = rc
+
+    def get_exit_status(self):
+        return self.rc
+
+
+class UpdStub:
+    """Enough of the window for _updated, with run_async really running the command (no token, as in Grove)."""
+    _updated = g.Grove._updated
+    fill_missing = g.Grove.fill_missing
+
+    def __init__(self):
+        self.latest_tags, self.toasts, self.rebuilt, self.ran = {"P": {"tag": "v2"}}, [], [], []
+
+    def toast(self, msg):
+        self.toasts.append(msg)
+
+    def rebuild(self, pid):
+        self.rebuilt.append(pid)
+
+    def save(self):
+        pass
+
+    def run_async(self, argv, cb, slug=None, token=False):
+        self.ran.append((argv, slug, token))
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+        cb(Proc(r.returncode), r.stdout, r.stderr)
+
+
+def updated_project(script):
+    path = tempfile.mkdtemp()
+    open(os.path.join(path, "app"), "w").write("x")
+    if script is not None:
+        sh = os.path.join(path, "install.sh")
+        open(sh, "w").write("#!/bin/sh\n" + script)
+        os.chmod(sh, 0o755)
+    d = {"id": "P", "name": "Med", "path": path, "install": "", "run": "",
+         "release": {"tag": "v2", "kind": "download", "asset": "med.zip"}}
+    s = UpdStub()
+    s._updated(d, {"tag": "v2"}, True)
+    return s, d, path
+
+
+# read waits for a keyboard: it must get end-of-input instead of hanging the update
+s, d, path = updated_project('read x; pwd > installed-here; echo "$GH_TOKEN" > token-seen\n')
+check("update re-runs install.sh", os.path.exists(os.path.join(path, "installed-here")), True)
+check("install.sh runs inside the new folder",
+      open(os.path.join(path, "installed-here")).read().strip(), os.path.realpath(path))
+check("install.sh is not handed a token", (s.ran[0][1], s.ran[0][2], open(os.path.join(path, "token-seen")).read().strip()),
+      (None, False, ""))
+check("update + reinstall toast", s.toasts, ["Updated Med to v2 (the old copy is kept beside it) and ran its installer again"])
+check("page rebuilt once, after the installer", s.rebuilt, ["P"])
+check("new release no longer offered", s.latest_tags, {})
+
+s, d, path = updated_project('echo "cannot copy to ~/.local/share" >&2; exit 3\n')
+check("failed install.sh is reported", s.toasts,
+      ['Updated Med to v2, but its install.sh failed: cannot copy to ~/.local/share. '
+       'Use "Install again" on its page to see why.'])
+
+s, d, path = updated_project(None)
+check("no install.sh: nothing is run", s.ran, [])
+check("no install.sh: plain toast", s.toasts, ["Updated Med to v2 (the old copy is kept beside it)"])
+
+s = UpdStub()
+s._updated({"id": "P", "name": "Med", "path": folder}, {"tag": "v2"}, False)
+check("failed download runs nothing", (s.ran, s.toasts, s.rebuilt), ([], [], ["P"]))
+
+check("reinstall: plain install.sh", g.reinstall_needed("./install.sh"), True)
+check("reinstall: software step first, then install.sh", g.reinstall_needed("sudo pacman -S --needed foo && ./install.sh"), True)
+check("reinstall: not for npm", g.reinstall_needed("npm install"), False)
+check("reinstall: not for nothing", g.reinstall_needed(None), False)
+
 print("ALL OK" if not failed else f"FAILED: {failed}")
 sys.exit(1 if failed else 0)

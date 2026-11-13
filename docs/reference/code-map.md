@@ -15,7 +15,7 @@ and the function names below: `grep -n "def pick_asset\|# ---- releases" grove.p
 | `# ---- tags, smart groups, fuzzy search...`: `parse_tags`, `fuzzy_score`, `launcher_matches`, `resolve_project`, `parse_github_url`, `smart_groups`, `record_run` | Pure helpers (tested in `tests/test_smart.py`) |
 | `smart_items`, `show_launcher`, `sync_starred`, `_drop_on_row`, `_drop_link`, `add_repo` | Smart groups, Ctrl+K launcher, Wishlist import, drag and drop |
 | `cli_main`, `class App` / `do_command_line` | `grove run/list` with no window, and `--quick` reaching a running window |
-| `check_update`, `check_now`, `check_now_button`, `check_all_updates`, `update_release` | Per-project updates: the automatic once-per-session check, the manual "Check for updates" button on a project's page, and Menu > Check my projects for updates |
+| `check_update`, `check_now`, `check_now_button`, `check_all_updates`, `update_release` | Per-project updates: the automatic once-per-session check, the manual "Check for updates" button on a project's page, and Menu > Check my projects for updates. After a downloaded update, `_updated` re-runs `./install.sh` out of sight (`reinstall_needed`, `reinstall_argv`, near `_detect_by_files`) |
 | `class Column`, `grad_class`, `project_icon`, `find_icon`, `BUILTIN_ICONS` | Page layout helper and the icons |
 | `class Grove` / `rebuild`, `_selected`, `open_group`, `_on_back` | Home list and navigation |
 | `# ---- detail pane`: `show_detail`, `empty_page`, `project_page`, `big_icon` | A project's page, with the one big button |
