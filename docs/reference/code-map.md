@@ -7,7 +7,7 @@ and the function names below: `grep -n "def pick_asset\|# ---- releases" grove.p
 |---|---|
 | top: `APP_CSS`, `WARM_LIGHT/WARM_DARK/WARM_CSS`, `HACKERS_CSS` | The look. The warm palette overrides libadwaita named colours; load order is APP, WARM, HACKERS (later wins) |
 | `default_settings`, `new_project`, `walk` | Data model helpers |
-| `# ---- releases`: `asset_score`, `pick_asset`, `parse_release`, `unpack` | Choosing and unpacking a release download |
+| `# ---- releases`: `asset_score`, `pick_asset`, `parse_release`, `pick_release` (newest release meant for this PC: skips Android-only releases, drafts, pre-releases), `unpack` | Choosing and unpacking a release download |
 | `release_run`, `readme_commands`, `_deps_step`, `detect_commands` | Working out the install and run commands for a folder |
 | `# ---- sharing private repos with a token`: `looks_like_token`, `write_curl_auth`, `summarize_token`, `rest_repo` | Token handling for private repos |
 | `is_installed_copy`, `update_available`, `write_update` | Self-update, behind the header update icon |

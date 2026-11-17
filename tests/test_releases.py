@@ -1,5 +1,6 @@
 """Offline checks for release downloads and run detection: python3 tests/test_releases.py"""
 import io
+import json
 import os
 import stat
 import sys
@@ -40,6 +41,22 @@ check("rest json", g.parse_release('{"tag_name":"v2","assets":[{"name":"b","brow
 check("rest json: download link, not the API url",
       g.parse_release('{"tag_name":"v2","assets":[{"name":"b","url":"api","browser_download_url":"dl"}]}')["assets"][0]["url"], "dl")
 check("not json", g.parse_release("nope"), None)
+
+# newest release for this PC: an Android-only release on top must not hide the Linux one (Spare Revamp, 2026-11-17)
+def rels(*rs):
+    return json.dumps([{"tag_name": t, "assets": [{"name": n, "browser_download_url": n} for n in ns], **extra}
+                       for t, ns, extra in rs])
+tag = lambda text: (g.pick_release(text) or {}).get("tag")  # noqa: E731
+check("android release skipped", tag(rels(("android-v0.1.1", ["SHA256SUMS", "spare-revamp-android-0.1.1.apk"], {}),
+                                          ("v0.4.0", ["spare-revamp-linux-x86_64.zip"], {}))), "v0.4.0")
+check("source-only release counts", tag(rels(("v2", [], {}), ("v1", ["a-linux-x86_64.tar.gz"], {}))), "v2")
+check("pre-release and draft skipped", tag(rels(("v3", ["a.AppImage"], {"prerelease": True}),
+                                                ("v2b", ["a.AppImage"], {"draft": True}),
+                                                ("v1", ["a.AppImage"], {}))), "v1")
+check("nothing for this PC", tag(rels(("v1", ["a.apk"], {}))), None)
+check("no releases", g.pick_release("[]"), None)
+check("error answer, not a list", g.pick_release('{"message":"Not Found"}'), None)
+check("list not json", g.pick_release("nope"), None)
 
 # a folder with a file of the same name inside it (app/app) lifts up cleanly
 z = os.path.join(tmp, "a.zip")

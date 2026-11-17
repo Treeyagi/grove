@@ -510,6 +510,31 @@ def parse_release(text):
         r = json.loads(text)
     except ValueError:
         return None
+    return _release(r) if isinstance(r, dict) else None
+
+
+def pick_release(text):
+    """From the REST API's list of releases (newest first), the newest one meant for this PC, or None.
+    Skips drafts and pre-releases (as GitHub's own "Latest" does) and releases for another platform: ones with
+    files but none this PC can use, like an Android release that only has an .apk. A release with no files at
+    all still counts, since that just means "use the source". Grove used to take GitHub's single "Latest"
+    release, so a repo's Android release hid its newer-looking Linux one (2026-11-17)."""
+    try:
+        items = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(items, list):
+        return None
+    for r in items:
+        if not isinstance(r, dict) or r.get("draft") or r.get("prerelease"):
+            continue
+        rel = _release(r)
+        if rel and (not rel["assets"] or pick_asset(rel["assets"])):
+            return rel
+    return None
+
+
+def _release(r):
     tag = r.get("tagName") or r.get("tag_name")
     if not tag:
         return None
@@ -2858,13 +2883,14 @@ class Grove(Adw.ApplicationWindow):
             self.toast(f"Couldn't make room in {path}: {e}")
 
     def latest_release(self, slug, cb):
-        """cb(release or None): the repo's latest release as {tag, assets}, using gh if there is one."""
+        """cb(release or None): the repo's newest release for this PC as {tag, assets} (see pick_release),
+        using gh if there is one."""
+        path = f"repos/{slug}/releases?per_page=30"
         if gh_ready():
-            argv = ["gh", "release", "view", "--repo", slug, "--json", "tagName,assets"]
+            argv = ["gh", "api", path]
         else:
-            argv = ["curl", "-fsSL", "-H", "Accept: application/vnd.github+json",
-                    f"https://api.github.com/repos/{slug}/releases/latest"]
-        self.run_async(argv, lambda proc, out, _e: cb(parse_release(out) if proc.get_exit_status() == 0 else None), slug=slug)
+            argv = ["curl", "-fsSL", "-H", "Accept: application/vnd.github+json", f"https://api.github.com/{path}"]
+        self.run_async(argv, lambda proc, out, _e: cb(pick_release(out) if proc.get_exit_status() == 0 else None), slug=slug)
 
     def _acquire(self, d, button, rel, then):
         if not rel:
