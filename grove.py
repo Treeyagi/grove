@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import uuid
 import zipfile
@@ -897,12 +898,20 @@ def gh_ready():
         return False
     now = time.monotonic()
     if now - _GH_SEEN[0] > 30:
-        try:
-            ok = subprocess.run(["gh", "auth", "status", "--hostname", "github.com"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                stdin=subprocess.DEVNULL, timeout=15).returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            ok = False
-        _GH_SEEN[0], _GH_SEEN[1] = now, ok
+        def ask():
+            try:
+                ok = subprocess.run(["gh", "auth", "status", "--hostname", "github.com"], stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, timeout=15).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                ok = False
+            _GH_SEEN[0], _GH_SEEN[1] = time.monotonic(), ok
+        if _GH_SEEN[0] == 0.0:
+            ask()   # never asked yet: the caller needs a real answer
+        else:
+            answer = _GH_SEEN[1]
+            _GH_SEEN[0] = now   # stale: answer from memory now and re-check in the background, so the UI never waits
+            threading.Thread(target=ask, daemon=True).start()
+            return answer
     return _GH_SEEN[1]
 
 
@@ -1124,6 +1133,7 @@ class Grove(Adw.ApplicationWindow):
         self.sel = None
         self.expanded = set(self.data.get("expanded", []))
         self.query = ""
+        self._group_counts, self._cloned_seen = {}, {}
         self.icons = {}          # project id -> icon texture (None = use the letter tile)
         self.readmes = {}        # project id -> README text ("" = repo has none)
         self.fetching = {}       # project id -> callbacks, for README downloads in flight
@@ -1317,11 +1327,15 @@ class Grove(Adw.ApplicationWindow):
 
     def save(self):
         self.data["expanded"] = sorted(self.expanded)
+        text = json.dumps(self.data, indent=2)
+        if text == getattr(self, "_saved_text", None):
+            return   # nothing changed since the last write (rebuild() saves every time)
         os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
         tmp = CONFIG + ".tmp"
         with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:   # it may hold a token
-            json.dump(self.data, f, indent=2)
+            f.write(text)
         os.replace(tmp, CONFIG)
+        self._saved_text = text
 
     def _on_close(self, *_):
         self.snapshot_expanded()
@@ -1491,15 +1505,26 @@ class Grove(Adw.ApplicationWindow):
             tex = None
             path = find_icon(d)
             if path:
+                # Decoded textures outlive rebuild() (which clears self.icons to re-find paths), keyed by file and mtime.
                 try:
-                    tex = Gdk.Texture.new_from_filename(path)
-                except GLib.Error:
-                    tex = None
+                    key = (path, os.stat(path).st_mtime_ns)
+                except OSError:
+                    key = None
+                cache = self.__dict__.setdefault("_textures", {})
+                tex = cache.get(key) if key else None
+                if tex is None:
+                    try:
+                        tex = Gdk.Texture.new_from_filename(path)
+                    except GLib.Error:
+                        tex = None
+                    if tex is not None and key:
+                        cache[key] = tex
             self.icons[d["id"]] = tex
         return self.icons[d["id"]]
 
     def rebuild(self, select=None):
         self.icons.clear()
+        self._group_counts, self._cloned_seen = {}, {}   # per-row facts, worked out once per rebuild
         self.snapshot_expanded()
         cur = self.current()
         select = select or (cur.data["id"] if cur else None)
@@ -1578,14 +1603,20 @@ class Grove(Adw.ApplicationWindow):
         box.label.set_css_classes(["section-title"] if node.is_group else ["row-title"])
         box.lock.set_visible(bool(d.get("private")))
         if node.is_group:
-            box.badge.set_label(str(sum(1 for c, *_ in walk(d["children"]) if c["type"] == "project")))
+            n = self._group_counts.get(d["id"])
+            if n is None:
+                n = self._group_counts[d["id"]] = sum(1 for c, *_ in walk(d["children"]) if c["type"] == "project")
+            box.badge.set_label(str(n))
         else:
             if box.grad:
                 box.icon.remove_css_class(box.grad)
             box.grad = grad_class(d["name"])
             box.icon.add_css_class(box.grad)
             box.icon.set_label((d["name"][:1] or "?").upper())
-            box.badge.set_label("Installed" if self.cloned(d) else "")
+            here = self._cloned_seen.get(d["id"])
+            if here is None:
+                here = self._cloned_seen[d["id"]] = self.cloned(d)
+            box.badge.set_label("Installed" if here else "")
         box.binding = node.bind_property("title", box.label, "label", GObject.BindingFlags.SYNC_CREATE)
         box.sub_binding = node.bind_property("subtitle", box.sub, "label", GObject.BindingFlags.SYNC_CREATE)
 
@@ -1886,13 +1917,26 @@ class Grove(Adw.ApplicationWindow):
         """README markdown for a project; "" if it has none, None if not known yet."""
         path = os.path.expanduser(d["path"]) if d["path"] else ""
         if path and os.path.isdir(path):
-            for name in sorted(os.listdir(path)):
-                if name.lower().startswith("readme"):
-                    try:
-                        with open(os.path.join(path, name), errors="replace") as f:
-                            return f.read()
-                    except OSError:
-                        pass
+            # Cached by the file's mtime and size, so rebuilds and searches don't re-read the disk each time.
+            cache = self.__dict__.setdefault("_local_readmes", {})
+            try:
+                hit = cache.get(path)
+                if hit:
+                    st = os.stat(os.path.join(path, hit[0]))
+                    if (st.st_mtime_ns, st.st_size) == hit[1]:
+                        return hit[2]
+                for name in sorted(os.listdir(path)):
+                    if name.lower().startswith("readme"):
+                        try:
+                            with open(os.path.join(path, name), errors="replace") as f:
+                                text = f.read()
+                            st = os.stat(os.path.join(path, name))
+                        except OSError:
+                            continue
+                        cache[path] = (name, (st.st_mtime_ns, st.st_size), text)
+                        return text
+            except OSError:
+                cache.pop(path, None)
         if d["id"] not in self.readmes:
             try:
                 with open(os.path.join(CACHE_DIR, d["id"] + ".md")) as f:
@@ -1901,12 +1945,24 @@ class Grove(Adw.ApplicationWindow):
                 return None
         return self.readmes[d["id"]]
 
+    def summary_of(self, d, text):
+        """summarize(text)[0], remembered per project until its README text changes."""
+        if not text:
+            return ""
+        cache = self.__dict__.setdefault("_summaries", {})
+        hit = cache.get(d["id"])
+        if hit and hit[0] == text:
+            return hit[1]
+        summary = summarize(text)[0]
+        cache[d["id"]] = (text, summary)
+        return summary
+
     def blurb(self, d):
         """One-line description for the sidebar."""
         if d.get("description"):
             return d["description"]
         text = self.readme_text(d)
-        summary = summarize(text)[0] if text else ""
+        summary = self.summary_of(d, text)
         return summary[:200] + ("…" if len(summary) > 200 else "")
 
     def search_store(self):
@@ -1916,7 +1972,7 @@ class Grove(Adw.ApplicationWindow):
                 continue
             text = self.readme_text(d)
             hay = " ".join([d["name"], d.get("description", ""), d.get("language", ""), " ".join(d.get("tags", [])),
-                            summarize(text)[0] if text else ""]).lower()
+                            self.summary_of(d, text)]).lower()
             if self.query in hay:
                 store.append(Node(d, None, self.blurb(d)))
         return store

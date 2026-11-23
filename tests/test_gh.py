@@ -49,7 +49,11 @@ try:
     check("the answer is remembered (no second gh call)", len(calls), n)
     g._GH_SEEN[0] -= 60
     g.subprocess.run = fake_run(1)
-    check("after 30 s it asks again (signed out later)", g.gh_ready(), False)
+    check("after 30 s it answers from memory without waiting", g.gh_ready(), True)
+    for t in g.threading.enumerate():
+        if t is not g.threading.main_thread():
+            t.join()
+    check("...and the background re-check is noticed next time (signed out later)", g.gh_ready(), False)
 
     def boom(argv, **kw):
         raise OSError("gone")

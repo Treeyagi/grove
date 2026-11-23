@@ -14,6 +14,7 @@ python3 tests/test_git_update.py
 python3 tests/test_smart.py
 python3 tests/test_ui_smart.py   # needs a display
 python3 tests/test_updates.py
+python3 tests/test_readme_cache.py
 ```
 
 Add a `check(...)` case for any new pure helper you write.
@@ -41,3 +42,8 @@ already verified.
 ## Background jobs
 
 Use the Bash tool's `run_in_background`. Jobs started with `nohup ... &` were killed when the call ended.
+
+## Timing
+
+`python3 tools/time_ui.py` builds the window against a copy of your config (temp XDG dirs, its own APP_ID) and prints
+import, window-build, rebuild and search times. Run it before and after a performance change.
